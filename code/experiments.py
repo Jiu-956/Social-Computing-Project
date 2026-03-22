@@ -23,6 +23,8 @@ from sklearn.metrics import (
 from sklearn.preprocessing import StandardScaler
 
 from .config import PipelineConfig
+from .gnn import run_gnn_experiment
+from .text_embeddings import load_or_compute_text_embeddings
 
 LOGGER = logging.getLogger(__name__)
 
@@ -34,133 +36,318 @@ class ExperimentOutputs:
     best_experiment: str
 
 
+@dataclass(slots=True)
+class ExperimentSpec:
+    name: str
+    family: str
+    estimator_kind: str
+    numeric_columns: list[str]
+    use_tfidf: bool = False
+    use_transformer: bool = False
+    graph_encoder: str = "none"
+    text_encoder: str = "none"
+
+
 def run_classification_experiments(config: PipelineConfig) -> ExperimentOutputs:
     users, manifest, embeddings = load_cached_artifacts(config)
+    graph_edges = pd.read_csv(config.cache_dir / "graph_edges.csv")
     users = users.merge(embeddings, on="user_id", how="left").fillna(0.0)
+
+    transformer_embeddings = None
+    transformer_columns: list[str] = []
+    try:
+        transformer_embeddings = load_or_compute_text_embeddings(config, users[["user_id", "combined_text"]].copy())
+        transformer_columns = [column for column in transformer_embeddings.columns if column != "user_id"]
+        users = users.merge(transformer_embeddings, on="user_id", how="left").fillna(0.0)
+    except Exception as exc:  # pragma: no cover - external model availability varies
+        LOGGER.warning("Transformer text embeddings are unavailable and will be skipped: %s", exc)
+
     profile_columns = manifest["profile_numeric_columns"]
     graph_columns = manifest.get("graph_numeric_columns", [])
-    embedding_columns = [column for column in embeddings.columns if column != "user_id"]
+    deepwalk_columns = manifest.get("deepwalk_embedding_columns", [column for column in embeddings.columns if column.startswith("dw_")])
+    node2vec_columns = manifest.get("node2vec_embedding_columns", [column for column in embeddings.columns if column.startswith("n2v_")])
 
-    experiments = [
-        {
-            "name": "profile_text_logreg",
-            "kind": "logreg",
-            "numeric_columns": profile_columns,
-            "use_text": True,
-        },
-        {
-            "name": "graph_profile_rf",
-            "kind": "rf",
-            "numeric_columns": profile_columns + graph_columns + embedding_columns,
-            "use_text": False,
-        },
-        {
-            "name": "full_logreg",
-            "kind": "logreg",
-            "numeric_columns": profile_columns + graph_columns + embedding_columns,
-            "use_text": True,
-        },
+    experiment_specs = [
+        ExperimentSpec(
+            name="profile_text_logreg",
+            family="baseline_feature_text",
+            estimator_kind="logreg",
+            numeric_columns=profile_columns,
+            use_tfidf=True,
+            graph_encoder="none",
+            text_encoder="tfidf",
+        ),
+        ExperimentSpec(
+            name="graph_profile_rf",
+            family="baseline_graph_deepwalk",
+            estimator_kind="rf",
+            numeric_columns=profile_columns + graph_columns + deepwalk_columns,
+            graph_encoder="deepwalk",
+        ),
+        ExperimentSpec(
+            name="full_logreg",
+            family="baseline_hybrid_deepwalk",
+            estimator_kind="logreg",
+            numeric_columns=profile_columns + graph_columns + deepwalk_columns,
+            use_tfidf=True,
+            graph_encoder="deepwalk",
+            text_encoder="tfidf",
+        ),
+        ExperimentSpec(
+            name="graph_node2vec_rf",
+            family="enhanced_graph_node2vec",
+            estimator_kind="rf",
+            numeric_columns=profile_columns + graph_columns + node2vec_columns,
+            graph_encoder="node2vec",
+        ),
+        ExperimentSpec(
+            name="full_node2vec_logreg",
+            family="enhanced_hybrid_node2vec",
+            estimator_kind="logreg",
+            numeric_columns=profile_columns + graph_columns + node2vec_columns,
+            use_tfidf=True,
+            graph_encoder="node2vec",
+            text_encoder="tfidf",
+        ),
     ]
+    if transformer_columns:
+        experiment_specs.extend(
+            [
+                ExperimentSpec(
+                    name="transformer_profile_logreg",
+                    family="enhanced_text_transformer",
+                    estimator_kind="logreg",
+                    numeric_columns=profile_columns + transformer_columns,
+                    use_transformer=True,
+                    text_encoder="transformer",
+                ),
+                ExperimentSpec(
+                    name="transformer_graph_logreg",
+                    family="enhanced_text_graph",
+                    estimator_kind="logreg",
+                    numeric_columns=profile_columns + graph_columns + node2vec_columns + transformer_columns,
+                    use_transformer=True,
+                    graph_encoder="node2vec",
+                    text_encoder="transformer",
+                ),
+            ]
+        )
+
+    metrics_rows: list[dict[str, Any]] = []
+    prediction_frames: list[pd.DataFrame] = []
+    best_experiment = ""
+    best_val_f1 = -1.0
+    best_artifact: dict[str, Any] = {}
 
     train_df = users[users["split"] == "train"].copy()
     val_df = users[users["split"] == "val"].copy()
     test_df = users[users["split"] == "test"].copy()
     all_df = users.copy()
 
-    metrics_rows: list[dict[str, Any]] = []
-    prediction_frames: list[pd.DataFrame] = []
-    best_experiment = ""
-    best_val_f1 = -1.0
+    for spec in experiment_specs:
+        LOGGER.info("Running experiment: %s", spec.name)
+        output = run_sklearn_experiment(config, spec, train_df, val_df, test_df, all_df, manifest)
+        metrics_rows.extend(output["metrics_rows"])
+        prediction_frames.append(output["predictions"])
 
-    for experiment in experiments:
-        LOGGER.info("Running experiment: %s", experiment["name"])
-        matrices = build_feature_matrices(
-            train_df=train_df,
-            val_df=val_df,
-            test_df=test_df,
-            all_df=all_df,
-            numeric_columns=experiment["numeric_columns"],
-            use_text=experiment["use_text"],
-            text_column=manifest["text_column"],
-            tfidf_max_features=config.tfidf_max_features,
-            tfidf_min_df=config.tfidf_min_df,
-        )
+        if output["best_val_f1"] > best_val_f1:
+            best_val_f1 = float(output["best_val_f1"])
+            best_experiment = spec.name
+            best_artifact = artifact_metadata(output["artifact"])
+            joblib.dump(output["artifact"], config.models_dir / "best_model.joblib")
+            if output["artifact"].get("model_object") is not None:
+                joblib.dump(output["artifact"], config.models_dir / "best_classifier.joblib")
 
-        if experiment["kind"] == "logreg":
-            model = LogisticRegression(
-                max_iter=1200,
-                solver="saga",
-                class_weight="balanced",
-                n_jobs=-1,
-                random_state=config.random_state,
+    if transformer_columns:
+        gnn_feature_columns = profile_columns + graph_columns + node2vec_columns + transformer_columns
+        for name, family, model_type in (
+            ("gcn_transformer", "gnn_gcn", "gcn"),
+            ("botrgcn_transformer", "gnn_botrgcn", "botrgcn"),
+        ):
+            LOGGER.info("Running experiment: %s", name)
+            gnn_output = run_gnn_experiment(
+                config=config,
+                name=name,
+                family=family,
+                users=all_df,
+                feature_frame=all_df[gnn_feature_columns].astype(np.float32),
+                graph_edges=graph_edges,
+                model_type=model_type,
             )
-            X_train = matrices["train_sparse"]
-            X_val = matrices["val_sparse"]
-            X_test = matrices["test_sparse"]
-            X_all = matrices["all_sparse"]
-        else:
-            model = RandomForestClassifier(
-                n_estimators=300,
-                random_state=config.random_state,
-                n_jobs=-1,
-                class_weight="balanced_subsample",
-            )
-            X_train = matrices["train_dense"]
-            X_val = matrices["val_dense"]
-            X_test = matrices["test_dense"]
-            X_all = matrices["all_dense"]
+            metrics_rows.extend(gnn_output.metrics_rows)
+            prediction_frames.append(gnn_output.predictions)
+            if gnn_output.best_val_f1 > best_val_f1:
+                best_val_f1 = float(gnn_output.best_val_f1)
+                best_experiment = name
+                best_artifact = {
+                    "experiment": name,
+                    "family": family,
+                    "model_type": model_type,
+                    "graph_encoder": model_type,
+                    "text_encoder": "transformer",
+                    "artifact_path": gnn_output.artifact_path,
+                }
+                joblib.dump(best_artifact, config.models_dir / "best_model.joblib")
 
-        y_train = train_df["label_id"].to_numpy(dtype=int)
-        y_val = val_df["label_id"].to_numpy(dtype=int)
-        y_test = test_df["label_id"].to_numpy(dtype=int)
-        y_all = all_df["label_id"].to_numpy(dtype=int)
-
-        model.fit(X_train, y_train)
-
-        pred_val, proba_val = predict_with_scores(model, X_val)
-        pred_test, proba_test = predict_with_scores(model, X_test)
-        pred_all, proba_all = predict_with_scores(model, X_all)
-
-        val_metrics = evaluate_predictions(y_val, pred_val, proba_val)
-        test_metrics = evaluate_predictions(y_test, pred_test, proba_test)
-
-        metrics_rows.extend(
-            [
-                {"experiment": experiment["name"], "split": "val", **val_metrics},
-                {"experiment": experiment["name"], "split": "test", **test_metrics},
-            ]
-        )
-
-        predictions = all_df[["user_id", "split", "label", "label_id"]].copy()
-        predictions["experiment"] = experiment["name"]
-        predictions["prediction"] = pred_all
-        predictions["bot_probability"] = proba_all
-        prediction_frames.append(predictions)
-
-        if val_metrics["f1"] > best_val_f1:
-            best_val_f1 = float(val_metrics["f1"])
-            best_experiment = experiment["name"]
-            joblib.dump(
-                {
-                    "model": model,
-                    "experiment": experiment,
-                    "numeric_columns": experiment["numeric_columns"],
-                    "use_text": experiment["use_text"],
-                    "vectorizer": matrices["vectorizer"],
-                    "scaler": matrices["scaler"],
-                },
-                config.models_dir / "best_classifier.joblib",
-            )
-
-    metrics_df = pd.DataFrame(metrics_rows).sort_values(["split", "f1"], ascending=[True, False])
+    metrics_df = pd.DataFrame(metrics_rows)
+    metrics_df = metrics_df.sort_values(["split", "f1", "auc_roc"], ascending=[True, False, False]).reset_index(drop=True)
     predictions_df = pd.concat(prediction_frames, ignore_index=True)
+    comparison_df = build_experiment_comparison(metrics_df)
 
     metrics_df.to_csv(config.tables_dir / "classification_metrics.csv", index=False)
     predictions_df.to_csv(config.tables_dir / "classification_predictions.csv", index=False)
+    comparison_df.to_csv(config.tables_dir / "classification_comparison.csv", index=False)
+
     with (config.models_dir / "best_experiment.json").open("w", encoding="utf-8") as handle:
-        json.dump({"best_experiment": best_experiment, "best_val_f1": best_val_f1}, handle, ensure_ascii=False, indent=2)
+        json.dump(
+            {
+                "best_experiment": best_experiment,
+                "best_val_f1": best_val_f1,
+                "artifact": best_artifact,
+            },
+            handle,
+            ensure_ascii=False,
+            indent=2,
+        )
 
     return ExperimentOutputs(metrics=metrics_df, predictions=predictions_df, best_experiment=best_experiment)
+
+
+def run_sklearn_experiment(
+    config: PipelineConfig,
+    spec: ExperimentSpec,
+    train_df: pd.DataFrame,
+    val_df: pd.DataFrame,
+    test_df: pd.DataFrame,
+    all_df: pd.DataFrame,
+    manifest: dict[str, Any],
+) -> dict[str, Any]:
+    matrices = build_feature_matrices(
+        train_df=train_df,
+        val_df=val_df,
+        test_df=test_df,
+        all_df=all_df,
+        numeric_columns=spec.numeric_columns,
+        use_text=spec.use_tfidf,
+        text_column=manifest["text_column"],
+        tfidf_max_features=config.tfidf_max_features,
+        tfidf_min_df=config.tfidf_min_df,
+    )
+
+    if spec.estimator_kind == "logreg":
+        model = LogisticRegression(
+            max_iter=1200,
+            solver="saga",
+            class_weight="balanced",
+            n_jobs=-1,
+            random_state=config.random_state,
+        )
+        X_train = matrices["train_sparse"]
+        X_val = matrices["val_sparse"]
+        X_test = matrices["test_sparse"]
+        X_all = matrices["all_sparse"]
+    else:
+        model = RandomForestClassifier(
+            n_estimators=300,
+            random_state=config.random_state,
+            n_jobs=-1,
+            class_weight="balanced_subsample",
+        )
+        X_train = matrices["train_dense"]
+        X_val = matrices["val_dense"]
+        X_test = matrices["test_dense"]
+        X_all = matrices["all_dense"]
+
+    y_train = train_df["label_id"].to_numpy(dtype=int)
+    y_val = val_df["label_id"].to_numpy(dtype=int)
+    y_test = test_df["label_id"].to_numpy(dtype=int)
+
+    model.fit(X_train, y_train)
+
+    pred_val, proba_val = predict_with_scores(model, X_val)
+    pred_test, proba_test = predict_with_scores(model, X_test)
+    pred_all, proba_all = predict_with_scores(model, X_all)
+
+    val_metrics = evaluate_predictions(y_val, pred_val, proba_val)
+    test_metrics = evaluate_predictions(y_test, pred_test, proba_test)
+
+    metrics_rows = [
+        {
+            "experiment": spec.name,
+            "family": spec.family,
+            "model_type": spec.estimator_kind,
+            "text_encoder": spec.text_encoder,
+            "graph_encoder": spec.graph_encoder,
+            "split": "val",
+            **val_metrics,
+        },
+        {
+            "experiment": spec.name,
+            "family": spec.family,
+            "model_type": spec.estimator_kind,
+            "text_encoder": spec.text_encoder,
+            "graph_encoder": spec.graph_encoder,
+            "split": "test",
+            **test_metrics,
+        },
+    ]
+
+    predictions = all_df[["user_id", "split", "label", "label_id"]].copy()
+    predictions["experiment"] = spec.name
+    predictions["family"] = spec.family
+    predictions["model_type"] = spec.estimator_kind
+    predictions["text_encoder"] = spec.text_encoder
+    predictions["graph_encoder"] = spec.graph_encoder
+    predictions["prediction"] = pred_all
+    predictions["bot_probability"] = proba_all
+
+    artifact = {
+        "experiment": spec.name,
+        "family": spec.family,
+        "model_type": spec.estimator_kind,
+        "numeric_columns": spec.numeric_columns,
+        "use_text": spec.use_tfidf,
+        "text_encoder": spec.text_encoder,
+        "graph_encoder": spec.graph_encoder,
+        "vectorizer": matrices["vectorizer"],
+        "scaler": matrices["scaler"],
+        "model_object": model,
+    }
+    return {
+        "metrics_rows": metrics_rows,
+        "predictions": predictions,
+        "artifact": artifact,
+        "best_val_f1": float(val_metrics["f1"]),
+    }
+
+
+def build_experiment_comparison(metrics_df: pd.DataFrame) -> pd.DataFrame:
+    test_df = metrics_df[metrics_df["split"] == "test"].copy()
+    if test_df.empty:
+        return pd.DataFrame()
+
+    baseline_best = test_df[test_df["family"].str.startswith("baseline")]["f1"].max()
+    baseline_best = float(baseline_best) if pd.notna(baseline_best) else 0.0
+    best_idx = test_df["f1"].idxmax()
+    best_row = test_df.loc[best_idx]
+
+    comparison = test_df.sort_values(["f1", "auc_roc"], ascending=False).reset_index(drop=True)
+    comparison["rank"] = np.arange(1, len(comparison) + 1)
+    comparison["delta_vs_best_baseline_f1"] = comparison["f1"] - baseline_best
+    comparison["delta_vs_top_model_f1"] = comparison["f1"] - float(best_row["f1"])
+    return comparison
+
+
+def artifact_metadata(artifact: dict[str, Any]) -> dict[str, Any]:
+    return {
+        "experiment": artifact.get("experiment"),
+        "family": artifact.get("family"),
+        "model_type": artifact.get("model_type"),
+        "text_encoder": artifact.get("text_encoder"),
+        "graph_encoder": artifact.get("graph_encoder"),
+        "numeric_columns": artifact.get("numeric_columns", []),
+        "use_text": bool(artifact.get("use_text", False)),
+    }
 
 
 def run_group_detection(
@@ -195,9 +382,10 @@ def run_group_detection(
     if candidate_df.empty:
         raise ValueError("No candidate nodes available for clustering.")
 
-    dense_columns = manifest["profile_numeric_columns"] + manifest.get("graph_numeric_columns", []) + [
-        column for column in embeddings.columns if column != "user_id"
-    ]
+    dense_columns = manifest["profile_numeric_columns"] + manifest.get("graph_numeric_columns", []) + manifest.get(
+        "embedding_columns",
+        [column for column in embeddings.columns if column != "user_id"],
+    )
     candidate_matrix = candidate_df[dense_columns].to_numpy(dtype=np.float32)
     scaler = StandardScaler()
     candidate_matrix = scaler.fit_transform(candidate_matrix)
@@ -310,13 +498,23 @@ def build_feature_matrices(
         val_text = val_df[text_column].fillna("").astype(str)
         test_text = test_df[text_column].fillna("").astype(str)
         all_text = all_df[text_column].fillna("").astype(str)
+        effective_min_df = min(tfidf_min_df, max(1, len(train_text)))
         vectorizer = TfidfVectorizer(
             max_features=tfidf_max_features,
-            min_df=tfidf_min_df,
+            min_df=effective_min_df,
             ngram_range=(1, 2),
             stop_words="english",
         )
-        X_train_text = vectorizer.fit_transform(train_text)
+        try:
+            X_train_text = vectorizer.fit_transform(train_text)
+        except ValueError:
+            vectorizer = TfidfVectorizer(
+                max_features=tfidf_max_features,
+                min_df=1,
+                ngram_range=(1, 2),
+                stop_words=None,
+            )
+            X_train_text = vectorizer.fit_transform(train_text)
         X_val_text = vectorizer.transform(val_text)
         X_test_text = vectorizer.transform(test_text)
         X_all_text = vectorizer.transform(all_text)
@@ -350,7 +548,11 @@ def load_cached_artifacts(config: PipelineConfig) -> tuple[pd.DataFrame, dict[st
     for column in manifest.get("graph_numeric_columns", []):
         if column not in users.columns:
             users[column] = 0.0
-    embedding_payload = joblib.load(config.cache_dir / "deepwalk_embeddings.joblib")
+
+    embedding_path = config.cache_dir / "graph_embeddings.joblib"
+    if not embedding_path.exists():
+        embedding_path = config.cache_dir / "deepwalk_embeddings.joblib"
+    embedding_payload = joblib.load(embedding_path)
     embeddings = pd.DataFrame(embedding_payload["embeddings"], columns=embedding_payload["columns"])
     embeddings.insert(0, "user_id", embedding_payload["user_id"])
     return users, manifest, embeddings

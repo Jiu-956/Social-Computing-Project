@@ -4,10 +4,12 @@ import argparse
 import logging
 from pathlib import Path
 
+from .community import run_community_analysis
 from .config import PipelineConfig
 from .data import prepare_dataset
 from .experiments import run_classification_experiments, run_group_detection
 from .features import enrich_with_graph_features
+from .reporting import generate_report
 from .visualization import generate_visualizations
 
 
@@ -21,14 +23,30 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--max-tweets-per-user", type=int, default=8)
     parser.add_argument("--tfidf-max-features", type=int, default=8000)
     parser.add_argument("--tfidf-min-df", type=int, default=3)
+    parser.add_argument("--transformer-model-name", default="sentence-transformers/all-MiniLM-L6-v2")
+    parser.add_argument("--transformer-batch-size", type=int, default=32)
+    parser.add_argument("--transformer-max-length", type=int, default=128)
     parser.add_argument("--deepwalk-dimensions", type=int, default=64)
     parser.add_argument("--deepwalk-walk-length", type=int, default=20)
     parser.add_argument("--deepwalk-num-walks", type=int, default=5)
     parser.add_argument("--deepwalk-window", type=int, default=5)
     parser.add_argument("--deepwalk-epochs", type=int, default=5)
+    parser.add_argument("--node2vec-dimensions", type=int, default=64)
+    parser.add_argument("--node2vec-walk-length", type=int, default=20)
+    parser.add_argument("--node2vec-num-walks", type=int, default=5)
+    parser.add_argument("--node2vec-window", type=int, default=5)
+    parser.add_argument("--node2vec-epochs", type=int, default=5)
+    parser.add_argument("--node2vec-return-p", type=float, default=1.0)
+    parser.add_argument("--node2vec-inout-q", type=float, default=2.0)
     parser.add_argument("--betweenness-sample-k", type=int, default=128)
     parser.add_argument("--harmonic-sample-sources", type=int, default=128)
     parser.add_argument("--tsne-sample-size", type=int, default=3000)
+    parser.add_argument("--gnn-hidden-dim", type=int, default=128)
+    parser.add_argument("--gnn-epochs", type=int, default=150)
+    parser.add_argument("--gnn-patience", type=int, default=20)
+    parser.add_argument("--gnn-learning-rate", type=float, default=0.01)
+    parser.add_argument("--gnn-weight-decay", type=float, default=5e-4)
+    parser.add_argument("--gnn-dropout", type=float, default=0.35)
     parser.add_argument("--random-state", type=int, default=42)
     parser.add_argument("--log-level", default="INFO")
 
@@ -42,9 +60,18 @@ def build_parser() -> argparse.ArgumentParser:
     cluster_parser.add_argument("--threshold", type=float, default=0.8)
     cluster_parser.add_argument("--use-ground-truth", action="store_true")
 
-    subparsers.add_parser("visualize", help="Generate charts and cluster network plots")
+    community_parser = subparsers.add_parser("community", help="Run community discovery and modularity analysis")
+    community_parser.add_argument("--split", choices=["train", "val", "test"], default="test")
+    community_parser.add_argument("--threshold", type=float, default=0.8)
+    community_parser.add_argument("--use-ground-truth", action="store_true")
 
-    run_all_parser = subparsers.add_parser("run-all", help="Execute prepare/train/cluster/visualize in sequence")
+    subparsers.add_parser("visualize", help="Generate charts and cluster network plots")
+    subparsers.add_parser("report", help="Generate an experiment report")
+
+    run_all_parser = subparsers.add_parser(
+        "run-all",
+        help="Execute prepare/train/cluster/community/visualize/report in sequence",
+    )
     run_all_parser.add_argument("--method", choices=["dbscan", "spectral"], default="dbscan")
     run_all_parser.add_argument("--split", choices=["train", "val", "test"], default="test")
     run_all_parser.add_argument("--threshold", type=float, default=0.8)
@@ -60,14 +87,30 @@ def make_config(args: argparse.Namespace) -> PipelineConfig:
         max_tweets_per_user=args.max_tweets_per_user,
         tfidf_max_features=args.tfidf_max_features,
         tfidf_min_df=args.tfidf_min_df,
+        transformer_model_name=args.transformer_model_name,
+        transformer_batch_size=args.transformer_batch_size,
+        transformer_max_length=args.transformer_max_length,
         deepwalk_dimensions=args.deepwalk_dimensions,
         deepwalk_walk_length=args.deepwalk_walk_length,
         deepwalk_num_walks=args.deepwalk_num_walks,
         deepwalk_window=args.deepwalk_window,
         deepwalk_epochs=args.deepwalk_epochs,
+        node2vec_dimensions=args.node2vec_dimensions,
+        node2vec_walk_length=args.node2vec_walk_length,
+        node2vec_num_walks=args.node2vec_num_walks,
+        node2vec_window=args.node2vec_window,
+        node2vec_epochs=args.node2vec_epochs,
+        node2vec_return_p=args.node2vec_return_p,
+        node2vec_inout_q=args.node2vec_inout_q,
         betweenness_sample_k=args.betweenness_sample_k,
         harmonic_sample_sources=args.harmonic_sample_sources,
         tsne_sample_size=args.tsne_sample_size,
+        gnn_hidden_dim=args.gnn_hidden_dim,
+        gnn_epochs=args.gnn_epochs,
+        gnn_patience=args.gnn_patience,
+        gnn_learning_rate=args.gnn_learning_rate,
+        gnn_weight_decay=args.gnn_weight_decay,
+        gnn_dropout=args.gnn_dropout,
         random_state=args.random_state,
     )
 
@@ -97,8 +140,17 @@ def main() -> None:
             threshold=args.threshold,
             use_ground_truth=args.use_ground_truth,
         )
+    elif args.command == "community":
+        run_community_analysis(
+            config,
+            split=args.split,
+            threshold=args.threshold,
+            use_ground_truth=args.use_ground_truth,
+        )
     elif args.command == "visualize":
         generate_visualizations(config)
+    elif args.command == "report":
+        generate_report(config)
     elif args.command == "run-all":
         prepared = prepare_dataset(config)
         enrich_with_graph_features(config, prepared)
@@ -110,7 +162,14 @@ def main() -> None:
             threshold=args.threshold,
             use_ground_truth=args.use_ground_truth,
         )
+        run_community_analysis(
+            config,
+            split=args.split,
+            threshold=args.threshold,
+            use_ground_truth=args.use_ground_truth,
+        )
         generate_visualizations(config)
+        generate_report(config)
     else:
         parser.error(f"Unknown command: {args.command}")
 

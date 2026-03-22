@@ -6,7 +6,6 @@ import os
 import random
 from collections import defaultdict
 from dataclasses import dataclass
-from pathlib import Path
 from typing import Iterable
 
 import joblib
@@ -39,8 +38,10 @@ def enrich_with_graph_features(config: PipelineConfig, prepared: PreparedData) -
         harmonic_sample_sources=config.harmonic_sample_sources,
         seed=config.random_state,
     )
-    embeddings = train_deepwalk_embeddings(
-        graph.to_undirected(),
+
+    undirected = graph.to_undirected()
+    deepwalk_embeddings = train_deepwalk_embeddings(
+        undirected,
         target_user_ids=prepared.users["user_id"].tolist(),
         dimensions=config.deepwalk_dimensions,
         walk_length=config.deepwalk_walk_length,
@@ -49,10 +50,22 @@ def enrich_with_graph_features(config: PipelineConfig, prepared: PreparedData) -
         epochs=config.deepwalk_epochs,
         seed=config.random_state,
     )
+    node2vec_embeddings = train_node2vec_embeddings(
+        undirected,
+        target_user_ids=prepared.users["user_id"].tolist(),
+        dimensions=config.node2vec_dimensions,
+        walk_length=config.node2vec_walk_length,
+        num_walks=config.node2vec_num_walks,
+        window=config.node2vec_window,
+        epochs=config.node2vec_epochs,
+        seed=config.random_state,
+        return_p=config.node2vec_return_p,
+        inout_q=config.node2vec_inout_q,
+    )
+    embeddings = deepwalk_embeddings.merge(node2vec_embeddings, on="user_id", how="outer").fillna(0.0)
 
     users = prepared.users.merge(graph_features, on="user_id", how="left")
-
-    prepared.manifest["graph_numeric_columns"] = [
+    graph_numeric_columns = [
         "graph_in_degree",
         "graph_out_degree",
         "graph_total_degree",
@@ -64,8 +77,11 @@ def enrich_with_graph_features(config: PipelineConfig, prepared: PreparedData) -
         "graph_harmonic_approx",
         "graph_reciprocity",
     ]
+    prepared.manifest["graph_numeric_columns"] = graph_numeric_columns
+    prepared.manifest["deepwalk_embedding_columns"] = [column for column in deepwalk_embeddings.columns if column != "user_id"]
+    prepared.manifest["node2vec_embedding_columns"] = [column for column in node2vec_embeddings.columns if column != "user_id"]
     prepared.manifest["embedding_columns"] = [column for column in embeddings.columns if column != "user_id"]
-    for column in prepared.manifest["graph_numeric_columns"]:
+    for column in graph_numeric_columns:
         users[column] = users[column].fillna(0.0)
 
     users.to_csv(config.cache_dir / "users.csv", index=False)
@@ -77,14 +93,20 @@ def enrich_with_graph_features(config: PipelineConfig, prepared: PreparedData) -
     with (config.cache_dir / "network_summary.json").open("w", encoding="utf-8") as handle:
         json.dump(summary, handle, ensure_ascii=False, indent=2)
 
-    embeddings_payload = {
-        "user_id": embeddings["user_id"].tolist(),
+    dump_embedding_payload(config.cache_dir / "deepwalk_embeddings.joblib", deepwalk_embeddings)
+    dump_embedding_payload(config.cache_dir / "node2vec_embeddings.joblib", node2vec_embeddings)
+    dump_embedding_payload(config.cache_dir / "graph_embeddings.joblib", embeddings)
+
+    return GraphArtifacts(users=users, embeddings=embeddings, network_summary=summary)
+
+
+def dump_embedding_payload(path, embeddings: pd.DataFrame) -> None:
+    payload = {
+        "user_id": embeddings["user_id"].astype(str).tolist(),
         "embeddings": embeddings.drop(columns=["user_id"]).to_numpy(dtype=np.float32),
         "columns": [column for column in embeddings.columns if column != "user_id"],
     }
-    joblib.dump(embeddings_payload, config.cache_dir / "deepwalk_embeddings.joblib")
-
-    return GraphArtifacts(users=users, embeddings=embeddings, network_summary=summary)
+    joblib.dump(payload, path)
 
 
 def build_user_graph(graph_edges: pd.DataFrame, graph_nodes: Iterable[str] | None) -> nx.DiGraph:
@@ -98,7 +120,7 @@ def build_user_graph(graph_edges: pd.DataFrame, graph_nodes: Iterable[str] | Non
         if graph.has_edge(source, target):
             graph[source][target]["weight"] += weight
         else:
-            graph.add_edge(source, target, weight=weight)
+            graph.add_edge(source, target, weight=weight, relations=str(getattr(row, "relations", "")))
     return graph
 
 
@@ -193,6 +215,11 @@ def approximate_harmonic_centrality(graph: nx.Graph, sample_size: int, seed: int
 
 
 class RandomWalkCorpus:
+    def __iter__(self):
+        raise NotImplementedError
+
+
+class DeepWalkCorpus(RandomWalkCorpus):
     def __init__(self, graph: nx.Graph, num_walks: int, walk_length: int, seed: int):
         self.graph = graph
         self.num_walks = num_walks
@@ -207,9 +234,9 @@ class RandomWalkCorpus:
         for _ in range(self.num_walks):
             rng.shuffle(nodes)
             for node in nodes:
-                yield self._generate_walk(node, rng)
+                yield self.generate_walk(node, rng)
 
-    def _generate_walk(self, start_node: str, rng: random.Random) -> list[str]:
+    def generate_walk(self, start_node: str, rng: random.Random) -> list[str]:
         walk = [str(start_node)]
         current = start_node
         for _ in range(self.walk_length - 1):
@@ -219,6 +246,61 @@ class RandomWalkCorpus:
             current = rng.choice(neighbors)
             walk.append(str(current))
         return walk
+
+
+class Node2VecCorpus(DeepWalkCorpus):
+    def __init__(
+        self,
+        graph: nx.Graph,
+        num_walks: int,
+        walk_length: int,
+        seed: int,
+        return_p: float,
+        inout_q: float,
+    ):
+        super().__init__(graph=graph, num_walks=num_walks, walk_length=walk_length, seed=seed)
+        self.return_p = max(return_p, 1e-6)
+        self.inout_q = max(inout_q, 1e-6)
+
+    def generate_walk(self, start_node: str, rng: random.Random) -> list[str]:
+        walk = [str(start_node)]
+        previous = None
+        current = start_node
+        for _ in range(self.walk_length - 1):
+            neighbors = self.adjacency.get(current)
+            if not neighbors:
+                break
+            if previous is None:
+                current = rng.choice(neighbors)
+            else:
+                weights = [self.transition_weight(previous, current, neighbor) for neighbor in neighbors]
+                current = weighted_choice(neighbors, weights, rng)
+            walk.append(str(current))
+            previous = walk[-2]
+        return walk
+
+    def transition_weight(self, previous_node: str, current_node: str, next_node: str) -> float:
+        previous_node = str(previous_node)
+        current_node = str(current_node)
+        next_node = str(next_node)
+        if next_node == previous_node:
+            return 1.0 / self.return_p
+        if self.graph.has_edge(next_node, previous_node) or self.graph.has_edge(previous_node, next_node):
+            return 1.0
+        return 1.0 / self.inout_q
+
+
+def weighted_choice(items: list[str], weights: list[float], rng: random.Random) -> str:
+    total = sum(max(weight, 0.0) for weight in weights)
+    if total <= 0:
+        return rng.choice(items)
+    threshold = rng.random() * total
+    cumulative = 0.0
+    for item, weight in zip(items, weights):
+        cumulative += max(weight, 0.0)
+        if cumulative >= threshold:
+            return item
+    return items[-1]
 
 
 def train_deepwalk_embeddings(
@@ -231,13 +313,67 @@ def train_deepwalk_embeddings(
     epochs: int,
     seed: int,
 ) -> pd.DataFrame:
+    corpus = DeepWalkCorpus(graph=graph, num_walks=num_walks, walk_length=walk_length, seed=seed)
+    return train_random_walk_embeddings(
+        corpus=corpus,
+        graph=graph,
+        target_user_ids=target_user_ids,
+        dimensions=dimensions,
+        window=window,
+        epochs=epochs,
+        seed=seed,
+        prefix="dw",
+    )
+
+
+def train_node2vec_embeddings(
+    graph: nx.Graph,
+    target_user_ids: list[str],
+    dimensions: int,
+    walk_length: int,
+    num_walks: int,
+    window: int,
+    epochs: int,
+    seed: int,
+    return_p: float,
+    inout_q: float,
+) -> pd.DataFrame:
+    corpus = Node2VecCorpus(
+        graph=graph,
+        num_walks=num_walks,
+        walk_length=walk_length,
+        seed=seed,
+        return_p=return_p,
+        inout_q=inout_q,
+    )
+    return train_random_walk_embeddings(
+        corpus=corpus,
+        graph=graph,
+        target_user_ids=target_user_ids,
+        dimensions=dimensions,
+        window=window,
+        epochs=epochs,
+        seed=seed,
+        prefix="n2v",
+    )
+
+
+def train_random_walk_embeddings(
+    corpus: RandomWalkCorpus,
+    graph: nx.Graph,
+    target_user_ids: list[str],
+    dimensions: int,
+    window: int,
+    epochs: int,
+    seed: int,
+    prefix: str,
+) -> pd.DataFrame:
     if graph.number_of_nodes() == 0:
         data = np.zeros((len(target_user_ids), dimensions), dtype=np.float32)
-        frame = pd.DataFrame(data, columns=[f"dw_{idx}" for idx in range(dimensions)])
+        frame = pd.DataFrame(data, columns=[f"{prefix}_{idx}" for idx in range(dimensions)])
         frame.insert(0, "user_id", target_user_ids)
         return frame
 
-    corpus = RandomWalkCorpus(graph=graph, num_walks=num_walks, walk_length=walk_length, seed=seed)
     workers = max(1, (os.cpu_count() or 1) - 1)
     model = Word2Vec(
         sentences=corpus,
@@ -250,9 +386,9 @@ def train_deepwalk_embeddings(
         seed=seed,
     )
 
-    rows = []
-    columns = [f"dw_{idx}" for idx in range(dimensions)]
+    columns = [f"{prefix}_{idx}" for idx in range(dimensions)]
     zero_vector = np.zeros(dimensions, dtype=np.float32)
+    rows = []
     for user_id in target_user_ids:
         vector = model.wv[user_id] if user_id in model.wv else zero_vector
         rows.append([user_id, *vector.tolist()])

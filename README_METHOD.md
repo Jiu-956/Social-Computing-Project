@@ -1,346 +1,291 @@
-# 当前方法实现说明
+# 方法实现与研究叙事
 
-这份文档说明当前项目中的方法是如何在代码里落地的。整体上，这不是一个端到端的深度学习模型，而是一条“数据解析 -> 图与文本特征构造 -> 监督分类 -> 可疑群体发现 -> 可视化”的实验流水线。
+这份文档说明当前项目的方法是如何组织的，以及为什么这套比较框架适合讲出一个清晰的研究故事。
 
-## 1. 总体流程
+## 1. 研究主线
 
-当前主入口在 `code/cli.py`，完整流程由下面四步组成：
+当前项目围绕一个很明确的问题展开：
 
-1. `prepare`：解析数据、抽取用户表、构建缓存
-2. `train`：训练分类基线模型
-3. `cluster`：对高风险账号做群体发现
-4. `visualize`：输出统计图和可疑群体子图
+**单个账号像不像机器人，和一群账号是不是在协同行动，其实是两个层次的问题。**
 
-执行 `python -m code run-all` 时，代码会按这个顺序依次调用：
+因此项目把整条流水线拆成两层：
 
-- `prepare_dataset`
-- `enrich_with_graph_features`
-- `run_classification_experiments`
-- `run_group_detection`
-- `generate_visualizations`
+1. 账号级检测：判断每个账号是 bot 还是 human
+2. 群体级分析：判断高风险账号之间是否形成结构化社群
 
-## 2. 数据准备是怎么做的
+这也是为什么项目同时保留三类方法：
+
+- 基于特征的方法
+- 基于文本的方法
+- 基于图的方法
+
+并进一步扩展到：
+
+- 图嵌入方法：DeepWalk、Node2Vec
+- 图神经网络方法：GCN、BotRGCN
+- 社区发现与模块度分析
+
+## 2. 为什么要保留 baseline
+
+原有的机器学习方法不是“旧代码”，而是故事里的第一层证据。
+
+它们回答的是：
+
+- 只看账号画像和简单文本，能做到什么程度？
+- 把图结构特征和随机游走嵌入加进来，能提升多少？
+
+因此当前 baseline 仍然保留：
+
+- `profile_text_logreg`
+- `graph_profile_rf`
+- `full_logreg`
+
+这三组模型提供一个稳定的对照系，后面所有增强方法都可以用它们来比较增益。
+
+## 3. 数据准备层是怎么实现的
 
 实现文件：`code/data.py`
 
-### 2.1 输入数据
+这一层做的事情是：
 
-默认从 `data/` 目录读取：
+- 从 `label.csv` 和 `split.csv` 得到有标签用户
+- 从 `edge.csv` 提取 `follow / friend / post` 等关系
+- 从 `node.json` 流式解析用户属性和 tweet 文本
+- 为每个用户构造画像字段、图统计字段和合并文本字段
 
-- `label.csv`
-- `split.csv`
-- `edge.csv`
-- `node.json`
+输出会进入 `result/cache/`，供后续所有实验复用。
 
-其中：
+这里的核心设计是：
 
-- `label.csv` 提供账号标签，`human=0`，`bot=1`
-- `split.csv` 提供训练、验证、测试划分
-- `edge.csv` 提供 `follow / friend / post` 等关系
-- `node.json` 提供用户画像和 tweet 节点内容
+- **分类只在有标签用户上评估**
+- **图上下文尽量保留**
+- **tweet 文本不直接作为节点做图学习，而是先转成用户级文本表示**
 
-### 2.2 标注用户和图节点
-
-代码先读取 `label.csv` 与 `split.csv`，得到有标签用户表。
-
-如果设置了 `--max-labeled-users`，就会在 `split × label` 分组内按比例采样，目的是做快速实验时仍尽量保持数据分布稳定。
-
-同时，代码会从 `split.csv` 中得到图上的用户集合。这样做的含义是：
-
-- 分类任务只对有标签用户评估
-- 图结构可以保留更多上下文节点
-
-### 2.3 边信息与 tweet 采样
-
-`collect_edge_information()` 会遍历 `edge.csv`，完成三件事：
-
-1. 抽取用户之间的 `follow/friend` 边，形成图结构
-2. 统计每个标注用户的入边、出边和发帖数量
-3. 从 `post` 边中为每个用户最多采样 `max_tweets_per_user` 条 tweet
-
-这里有一个比较关键的实现选择：
-
-- 图边只保留用户到用户的关系
-- tweet 节点不直接进入图建模，而是被转成文本特征
-
-### 2.4 解析 node.json
-
-`node.json` 很大，所以项目没有一次性整体加载，而是用 `stream_json_array()` 流式解析。
-
-之后：
-
-- 用户节点用来提取画像特征
-- tweet 节点用来回填之前采样到的文本内容
-
-画像特征包括：
-
-- `followers_count`
-- `following_count`
-- `listed_count`
-- `statuses_count`
-- `account_age_days`
-- `description_length`
-- `username_length`
-- `name_length`
-- `has_location`
-- `has_url`
-- `is_verified`
-- `is_protected`
-- `followers_following_ratio`
-
-文本部分则把用户简介和采样 tweet 合并为一个字段：
-
-- `combined_text = description_text + tweet_text`
-
-### 2.5 prepare 阶段输出
-
-这一阶段会把中间结果写入 `result/cache/`：
-
-- `users.csv`
-- `graph_edges.csv`
-- `graph_nodes.csv`
-- `manifest.json`
-- `network_summary.json`
-
-## 3. 图特征和 DeepWalk 是怎么做的
+## 4. 图表示：DeepWalk 和 Node2Vec
 
 实现文件：`code/features.py`
 
-### 3.1 构图方式
+当前项目先构建用户关系图，然后同时训练两种随机游走嵌入：
 
-项目把 `graph_edges.csv` 构造成一个有向图 `nx.DiGraph()`。
+- DeepWalk：无偏随机游走
+- Node2Vec：带 `p/q` 偏置的随机游走
 
-如果同一对节点之间有重复边，权重会累加。之后：
+为什么两者都保留：
 
-- 图统计特征主要基于 `graph`
-- DeepWalk 训练使用 `graph.to_undirected()`
+- DeepWalk 是经典图嵌入 baseline
+- Node2Vec 可以更灵活地在“局部社区结构”和“更远的结构角色”之间取平衡
 
-### 3.2 图统计特征
+在当前代码里：
 
-`compute_graph_features()` 为每个目标用户计算以下图特征：
+- DeepWalk 产物写到 `deepwalk_embeddings.joblib`
+- Node2Vec 产物写到 `node2vec_embeddings.joblib`
+- 合并后的图嵌入写到 `graph_embeddings.joblib`
 
-- 入度 `graph_in_degree`
-- 出度 `graph_out_degree`
-- 总度数 `graph_total_degree`
-- PageRank `graph_pagerank`
-- 聚类系数 `graph_clustering`
-- k-core 编号 `graph_core_number`
-- 连通分量大小 `graph_component_size`
-- 近似介数中心性 `graph_betweenness_approx`
-- 近似 harmonic centrality `graph_harmonic_approx`
-- reciprocity `graph_reciprocity`
+这让后续实验可以显式比较：
 
-这里有两个近似项：
+- 传统图统计特征是否够用
+- DeepWalk 能带来多少提升
+- Node2Vec 是否比 DeepWalk 更适合机器人群体结构
 
-- 介数中心性使用 `k` 采样，避免全图精确计算太慢
-- harmonic centrality 也只对部分源点采样
+## 5. 文本表示：从 TF-IDF 到 Transformer
 
-这是为了让实验能在普通机器上运行，而不是追求最重的图算法配置。
+实现文件：
 
-### 3.3 DeepWalk 实现
+- `code/experiments.py`
+- `code/text_embeddings.py`
 
-项目没有单独依赖现成 DeepWalk 包，而是在 `features.py` 里自己实现了一个轻量版本：
+文本部分分成两层：
 
-1. 用 `RandomWalkCorpus` 在无向图上做随机游走
-2. 把随机游走序列交给 `gensim.Word2Vec`
-3. 得到每个用户的嵌入向量 `dw_0 ... dw_n`
+### 5.1 原始 baseline 文本表示
 
-核心超参数包括：
+项目原有文本表示是：
 
-- `deepwalk_dimensions`
-- `deepwalk_walk_length`
-- `deepwalk_num_walks`
-- `deepwalk_window`
-- `deepwalk_epochs`
+- 用户简介 + 采样 tweet 合并成 `combined_text`
+- 用 `TfidfVectorizer` 提取稀疏文本特征
 
-输出写入：
+这对应的是一个非常典型、可复现、可解释的 baseline。
 
-- `result/cache/deepwalk_embeddings.joblib`
+### 5.2 更强文本编码器
 
-## 4. 分类实验是怎么做的
+现在新增了 Transformer 文本编码器路径：
+
+- 使用 `transformers` 的 `AutoTokenizer + AutoModel`
+- 对文本做 mean pooling
+- 输出稠密语义向量
+- 缓存到 `result/cache/text_embeddings_*.joblib`
+
+它的意义不是取代 TF-IDF，而是把故事推进一步：
+
+- TF-IDF 更像关键词匹配
+- Transformer 更像语义表示
+
+如果 Transformer 模型有效，通常意味着模型不只是抓住了“spam 词”，而是学到了更稳定的语义模式。
+
+## 6. 分类实验如何组织
 
 实现文件：`code/experiments.py`
 
-### 4.1 特征矩阵
+当前实验被组织成统一的对比框架，主要包含这些层次：
 
-分类阶段会读取缓存后的用户表和 DeepWalk 嵌入，并构造两类特征：
+### 6.1 原始 baseline
 
-- 数值特征：画像特征 + 图特征 + DeepWalk 向量
-- 文本特征：`combined_text` 的 TF-IDF
+- `profile_text_logreg`
+- `graph_profile_rf`
+- `full_logreg`
 
-数值特征先做 `StandardScaler` 标准化。
+### 6.2 图嵌入增强
 
-文本特征使用：
+- `graph_node2vec_rf`
+- `full_node2vec_logreg`
 
-- `TfidfVectorizer`
-- `ngram_range=(1, 2)`
-- `stop_words="english"`
+这组实验回答：
 
-如果某个实验需要文本，就把数值特征和 TF-IDF 稀疏矩阵拼接起来。
+**把 DeepWalk 换成 Node2Vec 后，结构表示是否更好？**
 
-### 4.2 当前内置的 3 组实验
+### 6.3 强文本编码增强
 
-项目里目前固定了三组基线：
+- `transformer_profile_logreg`
+- `transformer_graph_logreg`
 
-1. `profile_text_logreg`
-   只用画像数值特征 + 文本 TF-IDF，模型是逻辑回归
-2. `graph_profile_rf`
-   用画像 + 图特征 + DeepWalk，模型是随机森林
-3. `full_logreg`
-   用画像 + 图特征 + DeepWalk + 文本 TF-IDF，模型是逻辑回归
+这组实验回答：
 
-其中：
+**更强的文本语义表示，能否补足传统 TF-IDF 的局限？**
 
-- 逻辑回归使用 `solver="saga"` 与 `class_weight="balanced"`
-- 随机森林使用 `class_weight="balanced_subsample"`
+### 6.4 图神经网络
 
-### 4.3 训练与模型选择
+- `gcn_transformer`
+- `botrgcn_transformer`
 
-训练严格按 `train / val / test` 划分进行。
+这组实验回答：
 
-每个实验都会输出：
+**仅靠“先提特征再分类”是否已经足够，还是需要让节点特征在图上传播？**
 
-- 验证集指标
-- 测试集指标
-- 全部样本预测结果
+## 7. GCN 和 BotRGCN 是怎么落地的
 
-评价指标包括：
+实现文件：`code/gnn.py`
 
-- Accuracy
-- Precision
-- Recall
-- F1
-- AUC-ROC
+### 7.1 GCN
 
-最终模型不是按测试集选，而是按验证集 `F1` 最高来确定最佳实验。这一点比较重要，因为它避免了直接拿测试集做模型选择。
+GCN 的核心思路是：
 
-最佳模型和实验信息写入：
+- 节点先有自己的特征
+- 再通过图邻接矩阵把邻居信息聚合进来
+- 最后在图上传播后的表示上分类
 
-- `result/models/best_classifier.joblib`
-- `result/models/best_experiment.json`
+在当前实现里，GCN 使用：
 
-表格结果写入：
+- 两层图卷积
+- 训练集监督
+- 验证集 F1 做 early stopping
 
-- `result/tables/classification_metrics.csv`
-- `result/tables/classification_predictions.csv`
+### 7.2 BotRGCN
 
-## 5. 可疑群体发现是怎么做的
+BotRGCN 的关键不是“普通图卷积”，而是**关系感知**。
 
-实现文件：`code/experiments.py` 中的 `run_group_detection()`
+当前项目把边关系拆成不同 relation，例如：
 
-这一步不是直接对全体节点做聚类，而是先做候选筛选，再对候选 bot 聚类。
+- `follow`
+- `friend`
 
-### 5.1 候选节点筛选
+然后分别建立 relation-specific adjacency，再在每种关系上做独立线性变换并聚合。
 
-默认做法是：
+这样做的研究意义是：
 
-- 读取最佳分类实验的预测概率
-- 在指定 split 中选取 `bot_probability >= threshold` 的用户
+- 普通 GCN 假设所有边类型作用相同
+- BotRGCN 假设“关注关系”和“好友关系”的传播意义不一样
 
-如果阈值太高导致候选节点少于 10 个，代码会退化成：
+如果 BotRGCN 比 GCN 更强，就可以讲出一个更完整的故事：
 
-- 选取概率最高的前 `min(200, len(split_df))` 个用户
+**机器人协同行为不仅体现在有没有连接，更体现在是什么类型的连接。**
 
-也可以通过 `--use-ground-truth` 直接用真实 bot 标签做聚类，这通常更适合分析方法上限，而不是模拟真实场景。
+## 8. 群体发现：为什么先分类，再做结构分析
 
-### 5.2 聚类前处理
+实现文件：
 
-候选用户会使用下面的 dense 特征：
+- `code/experiments.py`
+- `code/community.py`
 
-- 画像数值特征
-- 图统计特征
-- DeepWalk 嵌入
+项目不是直接对全图做社区分析，而是采用两阶段流程：
 
-之后执行：
+1. 先用最佳分类器找出高风险 bot 候选
+2. 再在候选子图上做聚类与社区发现
 
-1. `StandardScaler`
-2. `PCA` 降到最多 16 维
-3. 聚类
+这样做的原因很现实：
 
-### 5.3 聚类方法
+- 直接对全图做社区发现，容易把大量正常用户的结构混进去
+- 先筛出高风险候选，再分析其内部结构，更符合“协同行为检测”的目标
 
-当前支持两种方法：
+## 9. 两种群体分析视角
 
-- `DBSCAN`
-- `SpectralClustering`
+### 9.1 向量空间聚类
 
-默认是 `DBSCAN`，因为它更适合“从高风险候选中找局部紧密群体”，而不是强行给所有样本分簇。
+`cluster` 命令做的是：
 
-### 5.4 聚类结果汇总
+- 在候选 bot 上取画像 + 图特征 + 图嵌入
+- 标准化
+- PCA 降维
+- DBSCAN 或 Spectral Clustering
 
-对于每个非噪声簇，代码会统计：
+它回答的是：
 
-- 簇大小
-- bot_ratio
-- human_ratio
-- 子图密度
-- 平均 bot 概率
+**这些高风险账号在表示空间里能不能自动聚成团？**
 
-同时输出整体指标：
+### 9.2 社区发现与模块度分析
 
-- `purity`
-- `nmi`
-- `noise_ratio`
-- `cluster_count`
+`community` 命令做的是：
 
-结果写入：
+- 在候选 bot 构成的子图上
+- 跑 Louvain 和 greedy modularity
+- 输出社区划分、社区规模和 modularity
 
-- `result/tables/cluster_assignments.csv`
-- `result/tables/cluster_summary.csv`
-- `result/tables/cluster_metrics.json`
+它回答的是：
 
-## 6. 可视化是怎么做的
+**这些高风险账号在真实社交关系图中，是否形成了非随机的社群结构？**
 
-实现文件：`code/visualization.py`
+这两者的意义不同：
 
-当前会生成三类图：
+- 聚类：更偏表示空间
+- 社区发现：更偏真实网络结构
 
-### 6.1 度分布图
+如果两者同时支持“这些 bot 形成了紧密群体”，故事就会非常完整。
 
-`degree_distribution.png`
+## 10. 自动报告在故事里起什么作用
 
-比较 bot 与 human 在 `graph_total_degree` 上的分布差异。
+实现文件：`code/reporting.py`
 
-### 6.2 DeepWalk 嵌入 t-SNE 图
+自动报告不是简单把 CSV 拼起来，而是服务于研究叙事。
 
-`embedding_tsne.png`
+报告会自动汇总：
 
-流程是：
+- 最优模型是谁
+- 相对 strongest baseline 的提升是多少
+- 各 family 的最好结果
+- 聚类得到多少可疑群体
+- 哪种社区发现方法的模块度最高
 
-1. 先对 DeepWalk 向量标准化
-2. 先用 PCA 压缩到最多 32 维
-3. 再做 t-SNE 到二维
+最终输出 `result/report.md`，它能直接支持汇报或论文写作中的“实验结果与分析”部分。
 
-这张图主要用来观察 bot/human 在表示空间中的可分性。
+## 11. 当前最适合讲的故事
 
-### 6.3 最可疑簇的子图
+基于这套框架，一个比较完整、自然的故事可以这样讲：
 
-`top_suspicious_cluster.png`
+1. **第一层：传统可解释 baseline**
+   先证明账号画像、简单文本和图统计特征本身就能识别一部分 bot。
 
-代码会从聚类结果里选出“bot_ratio 和 size 综合最靠前”的簇，并绘制其内部连接结构。
+2. **第二层：更强表示提升检测性能**
+   再证明 Node2Vec 和 Transformer 文本编码器能比原始表示更好地捕获结构与语义信号。
 
-如果节点太多，只保留度数最高的前 80 个节点，避免图完全看不清。
+3. **第三层：图神经网络进一步利用协同结构**
+   GCN 和 BotRGCN 不只是“看单个账号”，而是在图上传播信息，因而更适合处理协同行为。
 
-## 7. 当前方法的特点
+4. **第四层：群体结构证据闭环**
+   即便账号级分类很强，也还需要说明这些高风险 bot 是否真的形成群体。
+   聚类、社区发现和模块度分析正好提供了这个结构层面的证据。
 
-从实现角度看，这套方法的核心思想是：
+因此最终故事不是“哪个模型分数更高”，而是：
 
-- 用传统机器学习而不是复杂神经网络做可复现实验基线
-- 把文本、画像、图统计和图嵌入合到同一条流水线里
-- 先做账号级二分类，再做高风险候选群体发现
+**从账号属性、文本语义、图结构到社区组织形式，多层证据共同支持机器人协同行为的存在。**
 
-它的优点是：
+## 12. 一句话总结
 
-- 结构清晰
-- 训练成本可控
-- 中间产物完整，便于论文写作和实验分析
-
-它的局限也很明确：
-
-- 图表示仍是手工图特征 + DeepWalk，不是端到端图神经网络
-- 群体发现依赖前一步分类质量
-- DBSCAN 和阈值选择会显著影响最终聚类结果
-
-## 8. 一句话概括当前实现
-
-当前项目实现的是一条面向社会计算实验的可复现 baseline 流程：先把 `TwiBot-20` 解析成用户级表征，再融合画像、文本、图结构和 DeepWalk 嵌入做 bot 分类，最后对高风险账号做聚类和可视化分析。
+当前项目已经从“传统机器学习 bot 检测 baseline”升级成了一套多方法、可比较、可讲故事的社会计算实验框架：既能比较单账号检测性能，也能分析高风险账号之间是否形成结构化协同群体。

@@ -27,6 +27,7 @@ def generate_visualizations(config: PipelineConfig) -> None:
 
     prediction_path = config.tables_dir / "classification_predictions.csv"
     cluster_path = config.tables_dir / "cluster_assignments.csv"
+    community_path = config.tables_dir / "community_summary.csv"
     edge_path = config.cache_dir / "graph_edges.csv"
 
     if prediction_path.exists():
@@ -45,6 +46,8 @@ def generate_visualizations(config: PipelineConfig) -> None:
 
     plot_degree_distribution(users, config)
     plot_embedding_map(users, config)
+    if community_path.exists():
+        plot_community_modularity(pd.read_csv(community_path), config)
 
     if edge_path.exists() and cluster_path.exists():
         plot_suspicious_cluster(users, pd.read_csv(edge_path), config)
@@ -173,4 +176,18 @@ def plot_suspicious_cluster(users: pd.DataFrame, edges: pd.DataFrame, config: Pi
     axis.axis("off")
     figure.tight_layout()
     figure.savefig(config.figures_dir / "top_suspicious_cluster.png", dpi=180)
+    plt.close(figure)
+
+
+def plot_community_modularity(summary_df: pd.DataFrame, config: PipelineConfig) -> None:
+    if summary_df.empty or "modularity" not in summary_df.columns:
+        return
+
+    figure, axis = plt.subplots(figsize=(8, 5))
+    sns.barplot(data=summary_df, x="method", y="modularity", palette="crest", ax=axis)
+    axis.set_title("Community Modularity by Method")
+    axis.set_xlabel("Community method")
+    axis.set_ylabel("Modularity")
+    figure.tight_layout()
+    figure.savefig(config.figures_dir / "community_modularity.png", dpi=180)
     plt.close(figure)

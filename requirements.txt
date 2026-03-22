@@ -7,3 +7,5 @@ matplotlib
 seaborn
 gensim
 joblib
+torch
+transformers
