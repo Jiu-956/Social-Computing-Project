@@ -1,4 +1,4 @@
-"""TwiBot-20 collaborative anomaly detection project package."""
+"""Standardized experiment code package."""
 
 from .config import PipelineConfig
 

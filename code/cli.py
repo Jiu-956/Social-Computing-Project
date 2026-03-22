@@ -13,10 +13,10 @@ from .visualization import generate_visualizations
 
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
-        description="TwiBot-20 collaborative anomaly detection pipeline",
+        description="Social computing experiment pipeline",
     )
-    parser.add_argument("--data-dir", type=Path, default=Path("Twibot-20"))
-    parser.add_argument("--output-dir", type=Path, default=Path("artifacts"))
+    parser.add_argument("--data-dir", type=Path, default=Path("data"))
+    parser.add_argument("--output-dir", type=Path, default=Path("result"))
     parser.add_argument("--max-labeled-users", type=int, default=None)
     parser.add_argument("--max-tweets-per-user", type=int, default=8)
     parser.add_argument("--tfidf-max-features", type=int, default=8000)
@@ -33,7 +33,7 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--log-level", default="INFO")
 
     subparsers = parser.add_subparsers(dest="command", required=True)
-    subparsers.add_parser("prepare", help="Parse TwiBot-20 and build cached features")
+    subparsers.add_parser("prepare", help="Parse the dataset and build cached features")
     subparsers.add_parser("train", help="Run classification baselines")
 
     cluster_parser = subparsers.add_parser("cluster", help="Run suspicious group discovery")

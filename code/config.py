@@ -7,7 +7,7 @@ from pathlib import Path
 @dataclass(slots=True)
 class PipelineConfig:
     data_dir: Path
-    output_dir: Path = Path("artifacts")
+    output_dir: Path = Path("result")
     max_labeled_users: int | None = None
     max_tweets_per_user: int = 8
     random_state: int = 42
