@@ -46,13 +46,24 @@ def run_community_analysis(
         if source_id in candidate_ids and target_id in candidate_ids:
             graph.add_edge(source_id, target_id, weight=float(row.weight))
 
+    overview_metrics = {
+        "split": split,
+        "threshold": float(threshold),
+        "use_ground_truth": bool(use_ground_truth),
+        "candidate_count": int(len(candidate_df)),
+        "candidate_with_edges": int(graph.number_of_nodes()),
+        "isolated_candidate_count": int(max(0, len(candidate_df) - graph.number_of_nodes())),
+        "subgraph_edge_count": int(graph.number_of_edges()),
+        "connected_component_count": int(nx.number_connected_components(graph)) if graph.number_of_nodes() > 0 else 0,
+    }
+
     if graph.number_of_nodes() == 0:
         empty_assignments = pd.DataFrame(columns=["method", "user_id", "community_id", "size", "bot_ratio", "average_probability", "density"])
         empty_summary = pd.DataFrame(columns=["method", "community_count", "modularity", "largest_community_size", "average_community_size", "average_bot_ratio"])
         empty_assignments.to_csv(config.tables_dir / "community_assignments.csv", index=False)
         empty_summary.to_csv(config.tables_dir / "community_summary.csv", index=False)
         with (config.tables_dir / "community_metrics.json").open("w", encoding="utf-8") as handle:
-            json.dump({}, handle, ensure_ascii=False, indent=2)
+            json.dump({**overview_metrics, "methods": {}}, handle, ensure_ascii=False, indent=2)
         return empty_assignments, empty_summary
 
     methods = {
@@ -62,7 +73,7 @@ def run_community_analysis(
 
     assignment_rows: list[dict[str, float | int | str]] = []
     summary_rows: list[dict[str, float | int | str]] = []
-    metrics_payload: dict[str, dict[str, float | int]] = {}
+    method_metrics: dict[str, dict[str, float | int]] = {}
     candidate_lookup = candidate_df.set_index("user_id")
 
     for method_name, communities in methods.items():
@@ -112,7 +123,7 @@ def run_community_analysis(
                 "average_density": float(sum(community_densities) / max(1, len(community_densities))),
             }
         )
-        metrics_payload[method_name] = {
+        method_metrics[method_name] = {
             "community_count": int(len(partition)),
             "modularity": modularity,
             "largest_community_size": int(max(community_sizes, default=0)),
@@ -124,7 +135,7 @@ def run_community_analysis(
     assignments_df.to_csv(config.tables_dir / "community_assignments.csv", index=False)
     summary_df.to_csv(config.tables_dir / "community_summary.csv", index=False)
     with (config.tables_dir / "community_metrics.json").open("w", encoding="utf-8") as handle:
-        json.dump(metrics_payload, handle, ensure_ascii=False, indent=2)
+        json.dump({**overview_metrics, "methods": method_metrics}, handle, ensure_ascii=False, indent=2)
 
     LOGGER.info("Community analysis completed with methods: %s", ", ".join(summary_df["method"].tolist()))
     return assignments_df, summary_df

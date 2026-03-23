@@ -19,56 +19,58 @@ def generate_report(config: PipelineConfig) -> Path:
     community_metrics = load_json(config.tables_dir / "community_metrics.json")
 
     report_lines = [
-        "# Experiment Report",
+        "# 实验报告",
         "",
-        f"Generated at: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}",
+        f"生成时间：{datetime.now().strftime('%Y-%m-%d %H:%M:%S')}",
         "",
-        "## The Story",
+        "## 核心结论",
         "",
         build_story(best_info, comparison_df, cluster_metrics, community_summary),
         "",
-        "## Data and Graph Overview",
+        "## 数据与图概况",
         "",
-        f"- Labeled users: {network_summary.get('labeled_user_count', 'N/A')}",
-        f"- Graph users: {network_summary.get('graph_user_count', 'N/A')}",
-        f"- Directed user edges: {network_summary.get('directed_user_edges', 'N/A')}",
-        f"- Graph density: {network_summary.get('density', 0.0):.4f}",
-        f"- Average clustering: {network_summary.get('average_clustering', 0.0):.4f}",
+        f"- 标注账号数：`{network_summary.get('labeled_user_count', 'N/A')}`",
+        f"- 图中账号数：`{network_summary.get('graph_user_count', 'N/A')}`",
+        f"- 有向关系边数：`{network_summary.get('directed_user_edges', 'N/A')}`",
+        f"- 图密度：`{network_summary.get('density', 0.0):.4f}`",
+        f"- 平均聚类系数：`{network_summary.get('average_clustering', 0.0):.4f}`",
         "",
-        "## Model Comparison",
+        "## 模型比较",
         "",
-        "Top test-set results:",
+        "测试集 Top 结果：",
         "",
         dataframe_to_markdown(
-            comparison_df[
-                [
-                    "rank",
-                    "experiment",
-                    "family",
-                    "model_type",
-                    "text_encoder",
-                    "graph_encoder",
-                    "f1",
-                    "auc_roc",
-                    "delta_vs_best_baseline_f1",
-                ]
-            ].head(10),
+            rename_comparison_columns(
+                comparison_df[
+                    [
+                        "rank",
+                        "experiment",
+                        "family",
+                        "model_type",
+                        "text_encoder",
+                        "graph_encoder",
+                        "f1",
+                        "auc_roc",
+                        "delta_vs_best_baseline_f1",
+                    ]
+                ].head(10)
+            ),
             precision=4,
         ),
         "",
-        "## Family-Level Reading",
+        "## 方法族解读",
         "",
         build_family_summary(comparison_df),
         "",
-        "## Suspicious Group Discovery",
+        "## 可疑群体发现",
         "",
         build_cluster_summary(cluster_metrics, cluster_summary),
         "",
-        "## Community and Modularity Analysis",
+        "## 社区与模块度分析",
         "",
         build_community_summary(community_summary, community_metrics),
         "",
-        "## Output Files",
+        "## 结果文件",
         "",
         "- `result/tables/classification_metrics.csv`",
         "- `result/tables/classification_comparison.csv`",
@@ -80,6 +82,35 @@ def generate_report(config: PipelineConfig) -> Path:
     report_path = config.output_dir / "report.md"
     report_path.write_text("\n".join(report_lines), encoding="utf-8")
     return report_path
+
+
+def rename_comparison_columns(df: pd.DataFrame) -> pd.DataFrame:
+    return df.rename(
+        columns={
+            "rank": "排名",
+            "experiment": "实验",
+            "family": "方法族",
+            "model_type": "模型类型",
+            "text_encoder": "文本编码",
+            "graph_encoder": "图编码",
+            "f1": "F1",
+            "auc_roc": "AUC-ROC",
+            "delta_vs_best_baseline_f1": "相对最佳基线F1提升",
+        }
+    )
+
+
+def rename_community_columns(df: pd.DataFrame) -> pd.DataFrame:
+    return df.rename(
+        columns={
+            "method": "方法",
+            "community_count": "社区数量",
+            "modularity": "模块度",
+            "largest_community_size": "最大社区规模",
+            "average_community_size": "平均社区规模",
+            "average_bot_ratio": "平均机器人占比",
+        }
+    )
 
 
 def load_json(path: Path) -> dict:
@@ -96,48 +127,46 @@ def safe_read_csv(path: Path) -> pd.DataFrame:
 
 def build_story(best_info: dict, comparison_df: pd.DataFrame, cluster_metrics: dict, community_summary: pd.DataFrame) -> str:
     if comparison_df.empty:
-        return "The report could not build a comparison story because no experiment metrics were found."
+        return "当前没有找到实验指标，因此暂时无法生成结果叙事。"
 
-    best_row = comparison_df.iloc[0]
+    best_experiment = best_info.get("best_experiment")
+    if best_experiment and "experiment" in comparison_df.columns:
+        best_candidates = comparison_df[comparison_df["experiment"] == best_experiment]
+        best_row = best_candidates.iloc[0] if not best_candidates.empty else comparison_df.iloc[0]
+    else:
+        best_row = comparison_df.iloc[0]
+
     baseline_rows = comparison_df[comparison_df["family"].astype(str).str.startswith("baseline")]
     baseline_row = baseline_rows.iloc[0] if not baseline_rows.empty else None
     baseline_f1 = float(baseline_row["f1"]) if baseline_row is not None else 0.0
     uplift = float(best_row["f1"]) - baseline_f1
 
     story_lines = [
-        f"The current winner is `{best_row['experiment']}` from the `{best_row['family']}` family.",
-        f"Its test F1 is `{float(best_row['f1']):.4f}` and AUC-ROC is `{float(best_row['auc_roc']):.4f}`.",
+        f"当前表现最好的实验是 `{best_row['experiment']}`，属于 `{best_row['family']}` 方法族。",
+        f"它在测试集上的 F1 为 `{float(best_row['f1']):.4f}`，AUC-ROC 为 `{float(best_row['auc_roc']):.4f}`。",
     ]
     if baseline_row is not None:
         story_lines.append(
-            f"Compared with the strongest original baseline `{baseline_row['experiment']}`, the F1 uplift is `{uplift:.4f}`."
+            f"相对于最强的原始 baseline `{baseline_row['experiment']}`，F1 提升了 `{uplift:.4f}`。"
         )
 
     if str(best_row["family"]).startswith("gnn"):
-        story_lines.append(
-            "This suggests the best gains come from jointly using richer node features and message passing over the social graph."
-        )
+        story_lines.append("这说明最明显的性能收益来自图上传播机制与更丰富节点特征的联合使用。")
     elif "transformer" in str(best_row["text_encoder"]):
-        story_lines.append(
-            "This suggests semantic text encoding is adding signal that TF-IDF could not recover cleanly."
-        )
+        story_lines.append("这说明 Transformer 文本语义表示补充了 TF-IDF 难以稳定捕获的判别信号。")
     elif "node2vec" in str(best_row["graph_encoder"]):
-        story_lines.append(
-            "This suggests the structural gain mainly comes from a stronger graph embedding rather than only hand-crafted graph statistics."
-        )
+        story_lines.append("这说明性能提升主要来自更强的图结构表示，而不只是手工图统计特征。")
     else:
-        story_lines.append(
-            "This suggests the original machine learning pipeline remains a strong baseline and should stay in the comparison set."
-        )
+        story_lines.append("这说明原始机器学习基线仍然具备较强竞争力，适合作为后续增强模型的比较参照。")
 
     if cluster_metrics:
         story_lines.append(
-            f"On suspicious-group discovery, clustering found `{cluster_metrics.get('cluster_count', 0)}` clusters from `{cluster_metrics.get('candidate_count', 0)}` high-risk accounts."
+            f"在可疑群体发现阶段，聚类方法从 `{cluster_metrics.get('candidate_count', 0)}` 个高风险账号中识别出了 `{cluster_metrics.get('cluster_count', 0)}` 个群体。"
         )
     if not community_summary.empty:
         best_method = community_summary.sort_values("modularity", ascending=False).iloc[0]
         story_lines.append(
-            f"For community structure, `{best_method['method']}` achieved the highest modularity at `{float(best_method['modularity']):.4f}`, indicating non-random coordination structure among suspicious accounts."
+            f"在社区发现阶段，`{best_method['method']}` 的模块度最高，达到 `{float(best_method['modularity']):.4f}`，说明高风险账号之间存在较明显的非随机组织结构。"
         )
 
     return " ".join(story_lines)
@@ -145,64 +174,85 @@ def build_story(best_info: dict, comparison_df: pd.DataFrame, cluster_metrics: d
 
 def build_family_summary(comparison_df: pd.DataFrame) -> str:
     if comparison_df.empty:
-        return "No model comparison table is available."
+        return "当前没有模型对比结果。"
 
     best_per_family = comparison_df.sort_values(["family", "f1", "auc_roc"], ascending=[True, False, False]).groupby("family").head(1)
     lines = []
     for row in best_per_family.itertuples(index=False):
         lines.append(
-            f"- `{row.family}` is led by `{row.experiment}` with F1 `{float(row.f1):.4f}` and AUC-ROC `{float(row.auc_roc):.4f}`."
+            f"- `{row.family}` 方法族中表现最好的是 `{row.experiment}`，其 F1 为 `{float(row.f1):.4f}`，AUC-ROC 为 `{float(row.auc_roc):.4f}`。"
         )
     return "\n".join(lines)
 
 
 def build_cluster_summary(cluster_metrics: dict, cluster_summary: pd.DataFrame) -> str:
     if not cluster_metrics:
-        return "Cluster outputs are not available."
+        return "当前没有可疑群体发现结果。"
+
     lines = [
-        f"- Candidate accounts: `{cluster_metrics.get('candidate_count', 0)}`",
-        f"- Discovered clusters: `{cluster_metrics.get('cluster_count', 0)}`",
-        f"- Purity: `{float(cluster_metrics.get('purity', 0.0)):.4f}`",
-        f"- NMI: `{float(cluster_metrics.get('nmi', 0.0)):.4f}`",
-        f"- Noise ratio: `{float(cluster_metrics.get('noise_ratio', 0.0)):.4f}`",
+        f"- 候选高风险账号数：`{cluster_metrics.get('candidate_count', 0)}`",
+        f"- 识别出的群体数量：`{cluster_metrics.get('cluster_count', 0)}`",
+        f"- Purity：`{float(cluster_metrics.get('purity', 0.0)):.4f}`",
+        f"- NMI：`{float(cluster_metrics.get('nmi', 0.0)):.4f}`",
+        f"- 噪声点比例：`{float(cluster_metrics.get('noise_ratio', 0.0)):.4f}`",
     ]
     if not cluster_summary.empty:
         top_cluster = cluster_summary.iloc[0]
         lines.append(
-            f"- The most suspicious cluster has size `{int(top_cluster['size'])}`, bot ratio `{float(top_cluster['bot_ratio']):.4f}`, and density `{float(top_cluster['density']):.4f}`."
+            f"- 最可疑的群体规模为 `{int(top_cluster['size'])}`，机器人占比为 `{float(top_cluster['bot_ratio']):.4f}`，子图密度为 `{float(top_cluster['density']):.4f}`。"
         )
     return "\n".join(lines)
 
 
 def build_community_summary(community_summary: pd.DataFrame, community_metrics: dict) -> str:
     if community_summary.empty:
-        return "Community analysis outputs are not available."
+        return "当前没有社区分析结果。"
 
-    lines = [
+    lines = []
+    candidate_count = community_metrics.get("candidate_count")
+    candidate_with_edges = community_metrics.get("candidate_with_edges")
+    isolated_candidate_count = community_metrics.get("isolated_candidate_count")
+    subgraph_edge_count = community_metrics.get("subgraph_edge_count")
+    connected_component_count = community_metrics.get("connected_component_count")
+
+    if candidate_count is not None:
+        lines.append(f"- 高风险候选账号总数：`{int(candidate_count)}`")
+    if candidate_with_edges is not None:
+        lines.append(f"- 进入社区子图的候选账号数：`{int(candidate_with_edges)}`")
+    if isolated_candidate_count is not None:
+        lines.append(f"- 未进入社区子图的孤立候选账号数：`{int(isolated_candidate_count)}`")
+    if subgraph_edge_count is not None:
+        lines.append(f"- 候选子图中的边数：`{int(subgraph_edge_count)}`")
+    if connected_component_count is not None:
+        lines.append(f"- 候选子图的连通分量数：`{int(connected_component_count)}`")
+
+    lines.append(
         dataframe_to_markdown(
-            community_summary[
-                [
-                    "method",
-                    "community_count",
-                    "modularity",
-                    "largest_community_size",
-                    "average_community_size",
-                    "average_bot_ratio",
+            rename_community_columns(
+                community_summary[
+                    [
+                        "method",
+                        "community_count",
+                        "modularity",
+                        "largest_community_size",
+                        "average_community_size",
+                        "average_bot_ratio",
+                    ]
                 ]
-            ],
+            ),
             precision=4,
         )
-    ]
+    )
     best_method = community_summary.sort_values("modularity", ascending=False).iloc[0]
     lines.append(
-        f"The highest-modularity partition is `{best_method['method']}` with modularity `{float(best_method['modularity']):.4f}`."
+        f"模块度最高的划分方法是 `{best_method['method']}`，其模块度为 `{float(best_method['modularity']):.4f}`。"
     )
     return "\n\n".join(lines)
 
 
 def dataframe_to_markdown(df: pd.DataFrame, precision: int = 4) -> str:
     if df.empty:
-        return "_No rows available._"
+        return "_暂无数据。_"
 
     display_df = df.copy()
     for column in display_df.columns:

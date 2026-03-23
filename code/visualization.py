@@ -79,12 +79,17 @@ def plot_embedding_map(users: pd.DataFrame, config: PipelineConfig) -> None:
         return
 
     sample_size = min(config.tsne_sample_size, len(users))
-    sample = users.groupby("label", group_keys=False).apply(
-        lambda frame: frame.sample(
-            n=min(max(1, sample_size // max(1, users["label"].nunique())), len(frame)),
-            random_state=config.random_state,
+    label_count = max(1, users["label"].nunique())
+    sample_per_label = max(1, sample_size // label_count)
+    sampled_frames = []
+    for _, frame in users.groupby("label", sort=False):
+        sampled_frames.append(
+            frame.sample(
+                n=min(sample_per_label, len(frame)),
+                random_state=config.random_state,
+            )
         )
-    )
+    sample = pd.concat(sampled_frames, ignore_index=True)
     sample = sample.drop_duplicates("user_id").reset_index(drop=True)
 
     scaler = StandardScaler()
