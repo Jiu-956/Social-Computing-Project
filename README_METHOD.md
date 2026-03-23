@@ -107,7 +107,7 @@
 
 ### 5.2 更强文本编码器
 
-现在新增了 Transformer 文本编码器路径：
+现在新增了 Transformer 文本编码路径：
 
 - 使用 `transformers` 的 `AutoTokenizer + AutoModel`
 - 对文本做 mean pooling

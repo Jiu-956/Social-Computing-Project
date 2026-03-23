@@ -19,6 +19,18 @@
 - 基于结构分析的方法：聚类、社区发现、模块度分析
 - 自动化结果整理：Markdown 报告自动生成
 
+## Conda 环境
+
+推荐按下面的方式手动创建环境：
+
+```bash
+conda create -n social_comp_project python=3.10 -y
+conda activate social_comp_project
+pip install -r requirements.txt
+$env:HF_ENDPOINT="https://hf-mirror.com"
+```
+
+
 ## 主要命令
 
 ```bash
@@ -34,13 +46,9 @@ python -m code run-all
 ## 推荐完整流程
 
 ```bash
-python -m code run-all ^
-  --data-dir data ^
-  --output-dir result ^
-  --transformer-model-name sentence-transformers/all-MiniLM-L6-v2 ^
-  --deepwalk-dimensions 64 ^
-  --node2vec-dimensions 64 ^
-  --threshold 0.8
+
+python -m code --data-dir data --output-dir result --transformer-model-name sentence-transformers/all-MiniLM-L6-v2 --logreg-max-iter 4000 --deepwalk-dimensions 64 --node2vec-dimensions 64 run-all --threshold 0.8
+
 ```
 
 ## 关键说明
@@ -91,4 +99,8 @@ python -m code run-all ^
 pip install -r requirements.txt
 ```
 
-如果你第一次运行 Transformer 文本编码实验，本地需要能访问或已经缓存 HuggingFace 模型。
+如果你第一次运行 Transformer 文本实验：
+
+- 代码会强制下载并使用 `--transformer-model-name` 指定的 HuggingFace 模型；如果下载失败，训练会直接报错停止。
+- 如果网络到 Hugging Face 不稳定，可以先配置代理，或在 PowerShell 里运行 `$env:HF_ENDPOINT="https://hf-mirror.com"` 后再启动实验。
+- 下载成功后，模型会缓存到本机的 HuggingFace 缓存目录，后续运行会复用缓存。

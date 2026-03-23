@@ -43,7 +43,6 @@ class ExperimentSpec:
     estimator_kind: str
     numeric_columns: list[str]
     use_tfidf: bool = False
-    use_transformer: bool = False
     graph_encoder: str = "none"
     text_encoder: str = "none"
 
@@ -53,14 +52,11 @@ def run_classification_experiments(config: PipelineConfig) -> ExperimentOutputs:
     graph_edges = pd.read_csv(config.cache_dir / "graph_edges.csv")
     users = users.merge(embeddings, on="user_id", how="left").fillna(0.0)
 
-    transformer_embeddings = None
-    transformer_columns: list[str] = []
-    try:
-        transformer_embeddings = load_or_compute_text_embeddings(config, users[["user_id", "combined_text"]].copy())
-        transformer_columns = [column for column in transformer_embeddings.columns if column != "user_id"]
-        users = users.merge(transformer_embeddings, on="user_id", how="left").fillna(0.0)
-    except Exception as exc:  # pragma: no cover - external model availability varies
-        LOGGER.warning("Transformer text embeddings are unavailable and will be skipped: %s", exc)
+    text_result = load_or_compute_text_embeddings(config, users[["user_id", "combined_text"]].copy())
+    transformer_embeddings = text_result.frame
+    transformer_text_encoder = text_result.encoder_name
+    transformer_columns = [column for column in transformer_embeddings.columns if column != "user_id"]
+    users = users.merge(transformer_embeddings, on="user_id", how="left").fillna(0.0)
 
     profile_columns = manifest["profile_numeric_columns"]
     graph_columns = manifest.get("graph_numeric_columns", [])
@@ -110,28 +106,25 @@ def run_classification_experiments(config: PipelineConfig) -> ExperimentOutputs:
             text_encoder="tfidf",
         ),
     ]
-    if transformer_columns:
-        experiment_specs.extend(
-            [
-                ExperimentSpec(
-                    name="transformer_profile_logreg",
-                    family="enhanced_text_transformer",
-                    estimator_kind="logreg",
-                    numeric_columns=profile_columns + transformer_columns,
-                    use_transformer=True,
-                    text_encoder="transformer",
-                ),
-                ExperimentSpec(
-                    name="transformer_graph_logreg",
-                    family="enhanced_text_graph",
-                    estimator_kind="logreg",
-                    numeric_columns=profile_columns + graph_columns + node2vec_columns + transformer_columns,
-                    use_transformer=True,
-                    graph_encoder="node2vec",
-                    text_encoder="transformer",
-                ),
-            ]
-        )
+    experiment_specs.extend(
+        [
+            ExperimentSpec(
+                name="transformer_profile_logreg",
+                family="enhanced_text_transformer",
+                estimator_kind="logreg",
+                numeric_columns=profile_columns + transformer_columns,
+                text_encoder=transformer_text_encoder,
+            ),
+            ExperimentSpec(
+                name="transformer_graph_logreg",
+                family="enhanced_text_graph",
+                estimator_kind="logreg",
+                numeric_columns=profile_columns + graph_columns + node2vec_columns + transformer_columns,
+                graph_encoder="node2vec",
+                text_encoder=transformer_text_encoder,
+            ),
+        ]
+    )
 
     metrics_rows: list[dict[str, Any]] = []
     prediction_frames: list[pd.DataFrame] = []
@@ -158,36 +151,36 @@ def run_classification_experiments(config: PipelineConfig) -> ExperimentOutputs:
             if output["artifact"].get("model_object") is not None:
                 joblib.dump(output["artifact"], config.models_dir / "best_classifier.joblib")
 
-    if transformer_columns:
-        gnn_feature_columns = profile_columns + graph_columns + node2vec_columns + transformer_columns
-        for name, family, model_type in (
-            ("gcn_transformer", "gnn_gcn", "gcn"),
-            ("botrgcn_transformer", "gnn_botrgcn", "botrgcn"),
-        ):
-            LOGGER.info("Running experiment: %s", name)
-            gnn_output = run_gnn_experiment(
-                config=config,
-                name=name,
-                family=family,
-                users=all_df,
-                feature_frame=all_df[gnn_feature_columns].astype(np.float32),
-                graph_edges=graph_edges,
-                model_type=model_type,
-            )
-            metrics_rows.extend(gnn_output.metrics_rows)
-            prediction_frames.append(gnn_output.predictions)
-            if gnn_output.best_val_f1 > best_val_f1:
-                best_val_f1 = float(gnn_output.best_val_f1)
-                best_experiment = name
-                best_artifact = {
-                    "experiment": name,
-                    "family": family,
-                    "model_type": model_type,
-                    "graph_encoder": model_type,
-                    "text_encoder": "transformer",
-                    "artifact_path": gnn_output.artifact_path,
-                }
-                joblib.dump(best_artifact, config.models_dir / "best_model.joblib")
+    gnn_feature_columns = list(dict.fromkeys(profile_columns + graph_columns + node2vec_columns + transformer_columns))
+    for name, family, model_type in (
+        ("gcn_transformer", "gnn_gcn", "gcn"),
+        ("botrgcn_transformer", "gnn_botrgcn", "botrgcn"),
+    ):
+        LOGGER.info("Running experiment: %s", name)
+        gnn_output = run_gnn_experiment(
+            config=config,
+            name=name,
+            family=family,
+            users=all_df,
+            feature_frame=all_df[gnn_feature_columns].astype(np.float32),
+            graph_edges=graph_edges,
+            model_type=model_type,
+            text_encoder=transformer_text_encoder,
+        )
+        metrics_rows.extend(gnn_output.metrics_rows)
+        prediction_frames.append(gnn_output.predictions)
+        if gnn_output.best_val_f1 > best_val_f1:
+            best_val_f1 = float(gnn_output.best_val_f1)
+            best_experiment = name
+            best_artifact = {
+                "experiment": name,
+                "family": family,
+                "model_type": model_type,
+                "graph_encoder": "gcn" if model_type == "gcn" else "botrgcn",
+                "text_encoder": transformer_text_encoder,
+                "artifact_path": gnn_output.artifact_path,
+            }
+            joblib.dump(best_artifact, config.models_dir / "best_model.joblib")
 
     metrics_df = pd.DataFrame(metrics_rows)
     metrics_df = metrics_df.sort_values(["split", "f1", "auc_roc"], ascending=[True, False, False]).reset_index(drop=True)
@@ -236,7 +229,7 @@ def run_sklearn_experiment(
 
     if spec.estimator_kind == "logreg":
         model = LogisticRegression(
-            max_iter=1200,
+            max_iter=config.logreg_max_iter,
             solver="saga",
             class_weight="balanced",
             n_jobs=-1,

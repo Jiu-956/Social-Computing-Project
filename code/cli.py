@@ -21,6 +21,7 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--output-dir", type=Path, default=Path("result"))
     parser.add_argument("--max-labeled-users", type=int, default=None)
     parser.add_argument("--max-tweets-per-user", type=int, default=8)
+    parser.add_argument("--logreg-max-iter", type=int, default=4000)
     parser.add_argument("--tfidf-max-features", type=int, default=8000)
     parser.add_argument("--tfidf-min-df", type=int, default=3)
     parser.add_argument("--transformer-model-name", default="sentence-transformers/all-MiniLM-L6-v2")
@@ -85,6 +86,7 @@ def make_config(args: argparse.Namespace) -> PipelineConfig:
         output_dir=args.output_dir,
         max_labeled_users=args.max_labeled_users,
         max_tweets_per_user=args.max_tweets_per_user,
+        logreg_max_iter=args.logreg_max_iter,
         tfidf_max_features=args.tfidf_max_features,
         tfidf_min_df=args.tfidf_min_df,
         transformer_model_name=args.transformer_model_name,

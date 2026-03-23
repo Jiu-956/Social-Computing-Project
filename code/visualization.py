@@ -184,7 +184,15 @@ def plot_community_modularity(summary_df: pd.DataFrame, config: PipelineConfig) 
         return
 
     figure, axis = plt.subplots(figsize=(8, 5))
-    sns.barplot(data=summary_df, x="method", y="modularity", palette="crest", ax=axis)
+    sns.barplot(
+        data=summary_df,
+        x="method",
+        y="modularity",
+        hue="method",
+        palette="crest",
+        legend=False,
+        ax=axis,
+    )
     axis.set_title("Community Modularity by Method")
     axis.set_xlabel("Community method")
     axis.set_ylabel("Modularity")

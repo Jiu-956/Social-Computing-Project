@@ -11,6 +11,7 @@ class PipelineConfig:
     max_labeled_users: int | None = None
     max_tweets_per_user: int = 8
     random_state: int = 42
+    logreg_max_iter: int = 4000
     tfidf_max_features: int = 8000
     tfidf_min_df: int = 3
     transformer_model_name: str = "sentence-transformers/all-MiniLM-L6-v2"

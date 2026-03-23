@@ -9,3 +9,6 @@ gensim
 joblib
 torch
 transformers
+sentence-transformers
+huggingface_hub
+safetensors

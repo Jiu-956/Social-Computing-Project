@@ -32,6 +32,7 @@ def run_gnn_experiment(
     feature_frame: pd.DataFrame,
     graph_edges: pd.DataFrame,
     model_type: str,
+    text_encoder: str = "none",
 ) -> GNNExperimentOutput:
     import torch
     import torch.nn as nn
@@ -138,6 +139,8 @@ def run_gnn_experiment(
     prediction_frame["experiment"] = name
     prediction_frame["family"] = family
     prediction_frame["model_type"] = model_type
+    prediction_frame["text_encoder"] = text_encoder
+    prediction_frame["graph_encoder"] = "gcn" if model_type == "gcn" else "botrgcn"
     prediction_frame["prediction"] = predictions
     prediction_frame["bot_probability"] = probabilities
 
@@ -149,7 +152,7 @@ def run_gnn_experiment(
             "experiment": name,
             "family": family,
             "model_type": model_type,
-            "text_encoder": "transformer",
+            "text_encoder": text_encoder,
             "graph_encoder": "gcn" if model_type == "gcn" else "botrgcn",
             "split": "val",
             **val_metrics,
@@ -158,7 +161,7 @@ def run_gnn_experiment(
             "experiment": name,
             "family": family,
             "model_type": model_type,
-            "text_encoder": "transformer",
+            "text_encoder": text_encoder,
             "graph_encoder": "gcn" if model_type == "gcn" else "botrgcn",
             "split": "test",
             **test_metrics,
