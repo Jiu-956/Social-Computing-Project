@@ -24,7 +24,6 @@ python -m code run-all
 ```text
 code/                  主要实验代码
 data/                  TwiBot-20 原始数据
-tests/                 smoke test
 artifacts/             运行后自动生成的缓存、模型、表格和图像
 README_METHOD.md       方法文档
 ```
@@ -105,11 +104,10 @@ python -m code run-all
 可以先运行下面的命令做最小验证：
 
 ```bash
-python -m unittest tests.test_smoke -v
 python -m code --help
 ```
 
-如果这两条命令都能正常执行，说明代码结构和基础依赖已经就绪。
+如果这条命令能够正常执行，说明代码结构和基础依赖已经就绪。
 
 ## 当前方法设计
 
