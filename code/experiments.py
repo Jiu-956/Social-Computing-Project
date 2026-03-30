@@ -2,601 +2,590 @@ from __future__ import annotations
 
 import json
 import logging
+import random
 from dataclasses import dataclass
-from pathlib import Path
 from typing import Any
 
 import joblib
+import networkx as nx
 import numpy as np
 import pandas as pd
 from scipy import sparse
-from sklearn.decomposition import PCA
+from sklearn.decomposition import TruncatedSVD
 from sklearn.ensemble import RandomForestClassifier
 from sklearn.feature_extraction.text import TfidfVectorizer
 from sklearn.linear_model import LogisticRegression
-from sklearn.metrics import (
-    accuracy_score,
-    normalized_mutual_info_score,
-    precision_recall_fscore_support,
-    roc_auc_score,
-)
+from sklearn.metrics import accuracy_score, precision_recall_fscore_support, roc_auc_score
 from sklearn.preprocessing import StandardScaler
 
-from .config import PipelineConfig
-from .gnn import run_gnn_experiment
-from .text_embeddings import load_or_compute_text_embeddings
+from .config import ProjectConfig, safe_slug
+from .data import PreparedDataset, load_prepared_dataset
+from .graph_models import run_graph_neural_models
 
 LOGGER = logging.getLogger(__name__)
-
-
-@dataclass(slots=True)
-class ExperimentOutputs:
-    metrics: pd.DataFrame
-    predictions: pd.DataFrame
-    best_experiment: str
 
 
 @dataclass(slots=True)
 class ExperimentSpec:
     name: str
     family: str
-    estimator_kind: str
+    estimator: str
     numeric_columns: list[str]
-    use_tfidf: bool = False
-    graph_encoder: str = "none"
-    text_encoder: str = "none"
+    text_mode: str = "none"
+    text_column: str = "combined_text"
 
 
-def run_classification_experiments(config: PipelineConfig) -> ExperimentOutputs:
-    users, manifest, embeddings = load_cached_artifacts(config)
-    graph_edges = pd.read_csv(config.cache_dir / "graph_edges.csv")
-    users = users.merge(embeddings, on="user_id", how="left").fillna(0.0)
+def run_experiments(config: ProjectConfig) -> dict[str, Any]:
+    config.ensure_directories()
+    prepared = load_prepared_dataset(config)
+    users = prepared.users.copy()
+    labeled = users[users["label_id"] >= 0].copy()
+    manifest = prepared.manifest
 
-    text_result = load_or_compute_text_embeddings(config, users[["user_id", "combined_text"]].copy())
-    transformer_embeddings = text_result.frame
-    transformer_text_encoder = text_result.encoder_name
-    transformer_columns = [column for column in transformer_embeddings.columns if column != "user_id"]
-    users = users.merge(transformer_embeddings, on="user_id", how="left").fillna(0.0)
+    feature_columns = manifest["feature_numeric_columns"] + manifest["feature_categorical_columns"]
+    graph_columns = manifest["graph_structural_columns"]
 
-    profile_columns = manifest["profile_numeric_columns"]
-    graph_columns = manifest.get("graph_numeric_columns", [])
-    deepwalk_columns = manifest.get("deepwalk_embedding_columns", [column for column in embeddings.columns if column.startswith("dw_")])
-    node2vec_columns = manifest.get("node2vec_embedding_columns", [column for column in embeddings.columns if column.startswith("n2v_")])
+    node2vec_frame = pd.DataFrame({"user_id": users["user_id"]})
+    node2vec_columns: list[str] = []
+    if config.run_node2vec:
+        node2vec_frame = compute_node2vec_embeddings(config, prepared)
+        node2vec_columns = [column for column in node2vec_frame.columns if column != "user_id"]
 
-    experiment_specs = [
+    transformer_frame = None
+    transformer_columns: list[str] = []
+    if config.use_transformer:
+        transformer_frame = compute_transformer_embeddings(
+            config=config,
+            text_df=labeled[["user_id", manifest["combined_text_column"]]].rename(columns={manifest["combined_text_column"]: "text"}),
+            cache_name="combined_transformer_embeddings",
+            prefix="combined_text_emb_",
+        )
+        if transformer_frame is not None:
+            transformer_columns = [column for column in transformer_frame.columns if column != "user_id"]
+
+    description_dense = compute_dense_text_embeddings(
+        config=config,
+        text_df=users[["user_id", manifest["description_text_column"]]].rename(columns={manifest["description_text_column"]: "text"}),
+        cache_name="description_dense_embeddings",
+        prefix="des_svd_",
+    )
+    tweet_dense = compute_dense_text_embeddings(
+        config=config,
+        text_df=users[["user_id", manifest["tweet_text_column"]]].rename(columns={manifest["tweet_text_column"]: "text"}),
+        cache_name="tweet_dense_embeddings",
+        prefix="tweet_svd_",
+    )
+
+    specs = [
         ExperimentSpec(
-            name="profile_text_logreg",
-            family="baseline_feature_text",
-            estimator_kind="logreg",
-            numeric_columns=profile_columns,
-            use_tfidf=True,
-            graph_encoder="none",
-            text_encoder="tfidf",
+            name="feature_only_logistic_regression",
+            family="feature_only",
+            estimator="logreg",
+            numeric_columns=feature_columns,
         ),
         ExperimentSpec(
-            name="graph_profile_rf",
-            family="baseline_graph_deepwalk",
-            estimator_kind="rf",
-            numeric_columns=profile_columns + graph_columns + deepwalk_columns,
-            graph_encoder="deepwalk",
+            name="feature_only_random_forest",
+            family="feature_only",
+            estimator="rf",
+            numeric_columns=feature_columns,
         ),
         ExperimentSpec(
-            name="full_logreg",
-            family="baseline_hybrid_deepwalk",
-            estimator_kind="logreg",
-            numeric_columns=profile_columns + graph_columns + deepwalk_columns,
-            use_tfidf=True,
-            graph_encoder="deepwalk",
-            text_encoder="tfidf",
+            name="text_only_tfidf_logistic_regression",
+            family="text_only",
+            estimator="logreg",
+            numeric_columns=[],
+            text_mode="tfidf",
         ),
         ExperimentSpec(
-            name="graph_node2vec_rf",
-            family="enhanced_graph_node2vec",
-            estimator_kind="rf",
-            numeric_columns=profile_columns + graph_columns + node2vec_columns,
-            graph_encoder="node2vec",
+            name="graph_only_structure_random_forest",
+            family="graph_only",
+            estimator="rf",
+            numeric_columns=graph_columns,
         ),
         ExperimentSpec(
-            name="full_node2vec_logreg",
-            family="enhanced_hybrid_node2vec",
-            estimator_kind="logreg",
-            numeric_columns=profile_columns + graph_columns + node2vec_columns,
-            use_tfidf=True,
-            graph_encoder="node2vec",
-            text_encoder="tfidf",
+            name="graph_only_node2vec_logistic_regression",
+            family="graph_only",
+            estimator="logreg",
+            numeric_columns=node2vec_columns,
+        ),
+        ExperimentSpec(
+            name="feature_text_tfidf_logistic_regression",
+            family="feature_text",
+            estimator="logreg",
+            numeric_columns=feature_columns,
+            text_mode="tfidf",
+        ),
+        ExperimentSpec(
+            name="feature_graph_random_forest",
+            family="feature_graph",
+            estimator="rf",
+            numeric_columns=feature_columns + graph_columns,
+        ),
+        ExperimentSpec(
+            name="feature_graph_node2vec_logistic_regression",
+            family="feature_graph",
+            estimator="logreg",
+            numeric_columns=feature_columns + graph_columns + node2vec_columns,
+        ),
+        ExperimentSpec(
+            name="feature_text_graph_tfidf_node2vec_logistic_regression",
+            family="feature_text_graph",
+            estimator="logreg",
+            numeric_columns=feature_columns + graph_columns + node2vec_columns,
+            text_mode="tfidf",
         ),
     ]
-    experiment_specs.extend(
-        [
-            ExperimentSpec(
-                name="transformer_profile_logreg",
-                family="enhanced_text_transformer",
-                estimator_kind="logreg",
-                numeric_columns=profile_columns + transformer_columns,
-                text_encoder=transformer_text_encoder,
-            ),
-            ExperimentSpec(
-                name="transformer_graph_logreg",
-                family="enhanced_text_graph",
-                estimator_kind="logreg",
-                numeric_columns=profile_columns + graph_columns + node2vec_columns + transformer_columns,
-                graph_encoder="node2vec",
-                text_encoder=transformer_text_encoder,
-            ),
-        ]
-    )
+    if transformer_columns:
+        specs.extend(
+            [
+                ExperimentSpec(
+                    name="text_only_transformer_logistic_regression",
+                    family="text_only",
+                    estimator="logreg",
+                    numeric_columns=transformer_columns,
+                ),
+                ExperimentSpec(
+                    name="feature_text_transformer_logistic_regression",
+                    family="feature_text",
+                    estimator="logreg",
+                    numeric_columns=feature_columns + transformer_columns,
+                ),
+            ]
+        )
 
     metrics_rows: list[dict[str, Any]] = []
     prediction_frames: list[pd.DataFrame] = []
     best_experiment = ""
     best_val_f1 = -1.0
-    best_artifact: dict[str, Any] = {}
 
-    train_df = users[users["split"] == "train"].copy()
-    val_df = users[users["split"] == "val"].copy()
-    test_df = users[users["split"] == "test"].copy()
-    all_df = users.copy()
+    merged_labeled = labeled.merge(node2vec_frame, on="user_id", how="left")
+    if transformer_frame is not None:
+        merged_labeled = merged_labeled.merge(transformer_frame, on="user_id", how="left")
 
-    for spec in experiment_specs:
+    for spec in specs:
         LOGGER.info("Running experiment: %s", spec.name)
-        output = run_sklearn_experiment(config, spec, train_df, val_df, test_df, all_df, manifest)
-        metrics_rows.extend(output["metrics_rows"])
-        prediction_frames.append(output["predictions"])
-
-        if output["best_val_f1"] > best_val_f1:
-            best_val_f1 = float(output["best_val_f1"])
+        result = _run_sklearn_experiment(config, spec, merged_labeled)
+        metrics_rows.extend(result["metrics_rows"])
+        prediction_frames.append(result["predictions"])
+        if result["best_val_f1"] > best_val_f1:
+            best_val_f1 = float(result["best_val_f1"])
             best_experiment = spec.name
-            best_artifact = artifact_metadata(output["artifact"])
-            joblib.dump(output["artifact"], config.models_dir / "best_model.joblib")
-            if output["artifact"].get("model_object") is not None:
-                joblib.dump(output["artifact"], config.models_dir / "best_classifier.joblib")
 
-    gnn_feature_columns = list(dict.fromkeys(profile_columns + graph_columns + node2vec_columns + transformer_columns))
-    for name, family, model_type in (
-        ("gcn_transformer", "gnn_gcn", "gcn"),
-        ("botrgcn_transformer", "gnn_botrgcn", "botrgcn"),
-    ):
-        LOGGER.info("Running experiment: %s", name)
-        gnn_output = run_gnn_experiment(
+    if config.run_gnn:
+        gnn_users = users.merge(description_dense, on="user_id", how="left").merge(tweet_dense, on="user_id", how="left")
+        if transformer_frame is not None:
+            gnn_users = gnn_users.merge(transformer_frame, on="user_id", how="left")
+        gnn_users = gnn_users.fillna(0.0)
+
+        for output in run_graph_neural_models(
             config=config,
-            name=name,
-            family=family,
-            users=all_df,
-            feature_frame=all_df[gnn_feature_columns].astype(np.float32),
-            graph_edges=graph_edges,
-            model_type=model_type,
-            text_encoder=transformer_text_encoder,
-        )
-        metrics_rows.extend(gnn_output.metrics_rows)
-        prediction_frames.append(gnn_output.predictions)
-        if gnn_output.best_val_f1 > best_val_f1:
-            best_val_f1 = float(gnn_output.best_val_f1)
-            best_experiment = name
-            best_artifact = {
-                "experiment": name,
-                "family": family,
-                "model_type": model_type,
-                "graph_encoder": "gcn" if model_type == "gcn" else "botrgcn",
-                "text_encoder": transformer_text_encoder,
-                "artifact_path": gnn_output.artifact_path,
-            }
-            joblib.dump(best_artifact, config.models_dir / "best_model.joblib")
+            users=gnn_users,
+            graph_edges=prepared.graph_edges,
+            description_columns=[column for column in description_dense.columns if column != "user_id"],
+            tweet_columns=[column for column in tweet_dense.columns if column != "user_id"],
+            num_property_columns=manifest["gnn_num_property_columns"],
+            cat_property_columns=manifest["gnn_cat_property_columns"],
+        ):
+            metrics_rows.extend(output.metrics_rows)
+            prediction_frames.append(output.predictions)
+            if output.best_val_f1 > best_val_f1:
+                best_val_f1 = output.best_val_f1
+                best_experiment = output.artifact_path.stem
 
     metrics_df = pd.DataFrame(metrics_rows)
     metrics_df = metrics_df.sort_values(["split", "f1", "auc_roc"], ascending=[True, False, False]).reset_index(drop=True)
-    predictions_df = pd.concat(prediction_frames, ignore_index=True)
-    comparison_df = build_experiment_comparison(metrics_df)
+    predictions_df = pd.concat(prediction_frames, ignore_index=True) if prediction_frames else pd.DataFrame()
+    family_summary = _build_family_summary(metrics_df)
 
-    metrics_df.to_csv(config.tables_dir / "classification_metrics.csv", index=False)
-    predictions_df.to_csv(config.tables_dir / "classification_predictions.csv", index=False)
-    comparison_df.to_csv(config.tables_dir / "classification_comparison.csv", index=False)
-
+    metrics_df.to_csv(config.tables_dir / "experiment_metrics.csv", index=False)
+    predictions_df.to_csv(config.tables_dir / "experiment_predictions.csv", index=False)
+    family_summary.to_csv(config.tables_dir / "family_summary.csv", index=False)
     with (config.models_dir / "best_experiment.json").open("w", encoding="utf-8") as handle:
-        json.dump(
-            {
-                "best_experiment": best_experiment,
-                "best_val_f1": best_val_f1,
-                "artifact": best_artifact,
-            },
-            handle,
-            ensure_ascii=False,
-            indent=2,
-        )
-
-    return ExperimentOutputs(metrics=metrics_df, predictions=predictions_df, best_experiment=best_experiment)
+        json.dump({"best_experiment": best_experiment, "best_val_f1": best_val_f1}, handle, ensure_ascii=False, indent=2)
+    return {
+        "metrics": metrics_df,
+        "predictions": predictions_df,
+        "family_summary": family_summary,
+        "best_experiment": best_experiment,
+    }
 
 
-def run_sklearn_experiment(
-    config: PipelineConfig,
-    spec: ExperimentSpec,
-    train_df: pd.DataFrame,
-    val_df: pd.DataFrame,
-    test_df: pd.DataFrame,
-    all_df: pd.DataFrame,
-    manifest: dict[str, Any],
-) -> dict[str, Any]:
-    matrices = build_feature_matrices(
-        train_df=train_df,
-        val_df=val_df,
-        test_df=test_df,
-        all_df=all_df,
-        numeric_columns=spec.numeric_columns,
-        use_text=spec.use_tfidf,
-        text_column=manifest["text_column"],
-        tfidf_max_features=config.tfidf_max_features,
-        tfidf_min_df=config.tfidf_min_df,
+def compute_node2vec_embeddings(config: ProjectConfig, prepared: PreparedDataset) -> pd.DataFrame:
+    cache_path = config.cache_dir / "node2vec_embeddings.csv"
+    if cache_path.exists():
+        cached = pd.read_csv(cache_path, low_memory=False)
+        if _is_valid_embedding_cache(cached, prepared.users["user_id"], prefix="n2v_", expected_dim=config.node2vec_dimensions):
+            return cached
+        LOGGER.warning("Existing Node2Vec cache does not match the current prepared dataset. Recomputing embeddings.")
+
+    try:
+        from gensim.models import Word2Vec
+    except Exception as exc:  # pragma: no cover
+        LOGGER.warning("Skipping Node2Vec because gensim is unavailable: %s", exc)
+        return pd.DataFrame({"user_id": prepared.users["user_id"]})
+
+    graph = nx.Graph()
+    graph.add_nodes_from(prepared.users["user_id"].tolist())
+    for row in prepared.graph_edges.itertuples(index=False):
+        weight = 1.0
+        if graph.has_edge(row.source_id, row.target_id):
+            graph[row.source_id][row.target_id]["weight"] += weight
+        else:
+            graph.add_edge(row.source_id, row.target_id, weight=weight)
+
+    corpus = Node2VecCorpus(
+        graph=graph,
+        walk_length=config.node2vec_walk_length,
+        num_walks=config.node2vec_num_walks,
+        seed=config.random_state,
+        return_p=config.node2vec_return_p,
+        inout_q=config.node2vec_inout_q,
     )
+    model = Word2Vec(
+        vector_size=config.node2vec_dimensions,
+        window=config.node2vec_window,
+        min_count=0,
+        sg=1,
+        workers=max(1, config.node2vec_workers),
+        epochs=config.node2vec_epochs,
+        seed=config.random_state,
+    )
+    model.build_vocab(corpus)
+    model.train(corpus, total_examples=model.corpus_count, epochs=model.epochs)
 
-    if spec.estimator_kind == "logreg":
-        model = LogisticRegression(
-            max_iter=config.logreg_max_iter,
-            solver="saga",
-            class_weight="balanced",
-            n_jobs=-1,
-            random_state=config.random_state,
+    rows = []
+    for user_id in prepared.users["user_id"].tolist():
+        if user_id in model.wv:
+            embedding = model.wv[user_id]
+        else:
+            embedding = np.zeros(config.node2vec_dimensions, dtype=np.float32)
+        row = {"user_id": user_id}
+        for index, value in enumerate(embedding.tolist()):
+            row[f"n2v_{index}"] = float(value)
+        rows.append(row)
+
+    frame = pd.DataFrame(rows)
+    frame.to_csv(cache_path, index=False)
+    return frame
+
+
+def compute_transformer_embeddings(
+    config: ProjectConfig,
+    text_df: pd.DataFrame,
+    cache_name: str,
+    prefix: str,
+) -> pd.DataFrame | None:
+    cache_path = config.cache_dir / f"{cache_name}_{safe_slug(config.transformer_model_name)}.joblib"
+    if cache_path.exists():
+        cached = joblib.load(cache_path)
+        if isinstance(cached, pd.DataFrame) and _is_valid_embedding_cache(cached, text_df["user_id"], prefix=prefix):
+            return cached
+        LOGGER.warning("Existing transformer cache does not match the current prepared dataset. Recomputing embeddings.")
+
+    try:
+        from sentence_transformers import SentenceTransformer
+    except Exception as exc:  # pragma: no cover
+        LOGGER.warning("SentenceTransformer is unavailable: %s", exc)
+        return None
+
+    try:
+        model = SentenceTransformer(config.transformer_model_name)
+        embeddings = model.encode(
+            text_df["text"].fillna("").tolist(),
+            batch_size=config.transformer_batch_size,
+            normalize_embeddings=True,
+            show_progress_bar=False,
         )
-        X_train = matrices["train_sparse"]
-        X_val = matrices["val_sparse"]
-        X_test = matrices["test_sparse"]
-        X_all = matrices["all_sparse"]
+    except Exception as exc:  # pragma: no cover
+        LOGGER.warning("Skipping transformer experiment because the model could not be loaded: %s", exc)
+        return None
+
+    frame = pd.DataFrame(embeddings, columns=[f"{prefix}{index}" for index in range(embeddings.shape[1])])
+    frame.insert(0, "user_id", text_df["user_id"].to_numpy())
+    joblib.dump(frame, cache_path)
+    return frame
+
+
+def compute_dense_text_embeddings(
+    config: ProjectConfig,
+    text_df: pd.DataFrame,
+    cache_name: str,
+    prefix: str,
+) -> pd.DataFrame:
+    cache_path = config.cache_dir / f"{cache_name}.joblib"
+    if cache_path.exists():
+        cached = joblib.load(cache_path)
+        if isinstance(cached, pd.DataFrame) and _is_valid_embedding_cache(cached, text_df["user_id"], prefix=prefix):
+            return cached
+        LOGGER.warning("Existing dense text cache does not match the current prepared dataset. Recomputing embeddings.")
+
+    vectorizer = TfidfVectorizer(
+        max_features=config.dense_text_max_features,
+        min_df=2 if len(text_df) > 100 else 1,
+        ngram_range=(1, 2),
+        sublinear_tf=True,
+    )
+    matrix = vectorizer.fit_transform(text_df["text"].fillna(""))
+    if matrix.shape[1] == 0:
+        dense = np.zeros((len(text_df), 1), dtype=np.float32)
     else:
+        n_components = min(config.dense_text_svd_dim, max(1, matrix.shape[1] - 1))
+        if n_components <= 1:
+            dense = matrix[:, :1].toarray().astype(np.float32)
+        else:
+            dense = TruncatedSVD(n_components=n_components, random_state=config.random_state).fit_transform(matrix).astype(np.float32)
+
+    frame = pd.DataFrame(dense, columns=[f"{prefix}{index}" for index in range(dense.shape[1])])
+    frame.insert(0, "user_id", text_df["user_id"].to_numpy())
+    joblib.dump(frame, cache_path)
+    return frame
+
+
+def _run_sklearn_experiment(config: ProjectConfig, spec: ExperimentSpec, dataset: pd.DataFrame) -> dict[str, Any]:
+    train_df = dataset[dataset["split"] == "train"].copy()
+    val_df = dataset[dataset["split"] == "val"].copy()
+    test_df = dataset[dataset["split"] == "test"].copy()
+
+    train_numeric_frame = _prepare_numeric_frame(train_df, spec.numeric_columns)
+    val_numeric_frame = _prepare_numeric_frame(val_df, spec.numeric_columns)
+    test_numeric_frame = _prepare_numeric_frame(test_df, spec.numeric_columns)
+
+    scaler = None
+    if spec.numeric_columns:
+        scaler = StandardScaler()
+        train_numeric = scaler.fit_transform(train_numeric_frame)
+        val_numeric = scaler.transform(val_numeric_frame)
+        test_numeric = scaler.transform(test_numeric_frame)
+    else:
+        train_numeric = np.zeros((len(train_df), 0), dtype=np.float32)
+        val_numeric = np.zeros((len(val_df), 0), dtype=np.float32)
+        test_numeric = np.zeros((len(test_df), 0), dtype=np.float32)
+
+    vectorizer = None
+    if spec.text_mode == "tfidf":
+        vectorizer = TfidfVectorizer(
+            max_features=config.tfidf_max_features,
+            min_df=config.tfidf_min_df,
+            ngram_range=(1, 2),
+            sublinear_tf=True,
+        )
+        train_text = vectorizer.fit_transform(train_df[spec.text_column].fillna(""))
+        val_text = vectorizer.transform(val_df[spec.text_column].fillna(""))
+        test_text = vectorizer.transform(test_df[spec.text_column].fillna(""))
+        numeric_train_sparse = sparse.csr_matrix(train_numeric)
+        numeric_val_sparse = sparse.csr_matrix(val_numeric)
+        numeric_test_sparse = sparse.csr_matrix(test_numeric)
+        train_matrix = sparse.hstack([numeric_train_sparse, train_text], format="csr")
+        val_matrix = sparse.hstack([numeric_val_sparse, val_text], format="csr")
+        test_matrix = sparse.hstack([numeric_test_sparse, test_text], format="csr")
+    else:
+        train_matrix = train_numeric
+        val_matrix = val_numeric
+        test_matrix = test_numeric
+
+    if spec.estimator == "rf":
         model = RandomForestClassifier(
             n_estimators=300,
             random_state=config.random_state,
             n_jobs=-1,
             class_weight="balanced_subsample",
         )
-        X_train = matrices["train_dense"]
-        X_val = matrices["val_dense"]
-        X_test = matrices["test_dense"]
-        X_all = matrices["all_dense"]
+    else:
+        model = LogisticRegression(
+            max_iter=4000,
+            solver="saga",
+            class_weight="balanced",
+            n_jobs=-1,
+            random_state=config.random_state,
+        )
 
     y_train = train_df["label_id"].to_numpy(dtype=int)
     y_val = val_df["label_id"].to_numpy(dtype=int)
     y_test = test_df["label_id"].to_numpy(dtype=int)
+    model.fit(train_matrix, y_train)
 
-    model.fit(X_train, y_train)
-
-    pred_val, proba_val = predict_with_scores(model, X_val)
-    pred_test, proba_test = predict_with_scores(model, X_test)
-    pred_all, proba_all = predict_with_scores(model, X_all)
-
-    val_metrics = evaluate_predictions(y_val, pred_val, proba_val)
-    test_metrics = evaluate_predictions(y_test, pred_test, proba_test)
+    val_pred, val_prob = _predict_with_probabilities(model, val_matrix)
+    test_pred, test_prob = _predict_with_probabilities(model, test_matrix)
 
     metrics_rows = [
-        {
-            "experiment": spec.name,
-            "family": spec.family,
-            "model_type": spec.estimator_kind,
-            "text_encoder": spec.text_encoder,
-            "graph_encoder": spec.graph_encoder,
-            "split": "val",
-            **val_metrics,
-        },
-        {
-            "experiment": spec.name,
-            "family": spec.family,
-            "model_type": spec.estimator_kind,
-            "text_encoder": spec.text_encoder,
-            "graph_encoder": spec.graph_encoder,
-            "split": "test",
-            **test_metrics,
-        },
+        {"experiment": spec.name, "family": spec.family, "split": "val", **_compute_metrics(y_val, val_pred, val_prob)},
+        {"experiment": spec.name, "family": spec.family, "split": "test", **_compute_metrics(y_test, test_pred, test_prob)},
     ]
 
-    predictions = all_df[["user_id", "split", "label", "label_id"]].copy()
-    predictions["experiment"] = spec.name
-    predictions["family"] = spec.family
-    predictions["model_type"] = spec.estimator_kind
-    predictions["text_encoder"] = spec.text_encoder
-    predictions["graph_encoder"] = spec.graph_encoder
-    predictions["prediction"] = pred_all
-    predictions["bot_probability"] = proba_all
+    predictions = pd.concat(
+        [
+            _prediction_frame(spec, "val", val_df["user_id"], y_val, val_pred, val_prob),
+            _prediction_frame(spec, "test", test_df["user_id"], y_test, test_pred, test_prob),
+        ],
+        ignore_index=True,
+    )
 
     artifact = {
-        "experiment": spec.name,
+        "name": spec.name,
         "family": spec.family,
-        "model_type": spec.estimator_kind,
-        "numeric_columns": spec.numeric_columns,
-        "use_text": spec.use_tfidf,
-        "text_encoder": spec.text_encoder,
-        "graph_encoder": spec.graph_encoder,
-        "vectorizer": matrices["vectorizer"],
-        "scaler": matrices["scaler"],
-        "model_object": model,
-    }
-    return {
-        "metrics_rows": metrics_rows,
-        "predictions": predictions,
-        "artifact": artifact,
-        "best_val_f1": float(val_metrics["f1"]),
-    }
-
-
-def build_experiment_comparison(metrics_df: pd.DataFrame) -> pd.DataFrame:
-    test_df = metrics_df[metrics_df["split"] == "test"].copy()
-    if test_df.empty:
-        return pd.DataFrame()
-
-    baseline_best = test_df[test_df["family"].str.startswith("baseline")]["f1"].max()
-    baseline_best = float(baseline_best) if pd.notna(baseline_best) else 0.0
-    best_idx = test_df["f1"].idxmax()
-    best_row = test_df.loc[best_idx]
-
-    comparison = test_df.sort_values(["f1", "auc_roc"], ascending=False).reset_index(drop=True)
-    comparison["rank"] = np.arange(1, len(comparison) + 1)
-    comparison["delta_vs_best_baseline_f1"] = comparison["f1"] - baseline_best
-    comparison["delta_vs_top_model_f1"] = comparison["f1"] - float(best_row["f1"])
-    return comparison
-
-
-def artifact_metadata(artifact: dict[str, Any]) -> dict[str, Any]:
-    return {
-        "experiment": artifact.get("experiment"),
-        "family": artifact.get("family"),
-        "model_type": artifact.get("model_type"),
-        "text_encoder": artifact.get("text_encoder"),
-        "graph_encoder": artifact.get("graph_encoder"),
-        "numeric_columns": artifact.get("numeric_columns", []),
-        "use_text": bool(artifact.get("use_text", False)),
-    }
-
-
-def run_group_detection(
-    config: PipelineConfig,
-    method: str = "dbscan",
-    split: str = "test",
-    threshold: float = 0.8,
-    use_ground_truth: bool = False,
-) -> tuple[pd.DataFrame, pd.DataFrame]:
-    users, manifest, embeddings = load_cached_artifacts(config)
-    users = users.merge(embeddings, on="user_id", how="left").fillna(0.0)
-
-    predictions = pd.read_csv(config.tables_dir / "classification_predictions.csv")
-    best_info = json.loads((config.models_dir / "best_experiment.json").read_text(encoding="utf-8"))
-    predictions = predictions[predictions["experiment"] == best_info["best_experiment"]]
-
-    split_df = users[users["split"] == split].copy()
-    split_predictions = predictions[predictions["split"] == split].copy()
-    split_df = split_df.merge(
-        split_predictions[["user_id", "bot_probability", "prediction"]],
-        on="user_id",
-        how="left",
-    )
-
-    if use_ground_truth:
-        candidate_df = split_df[split_df["label_id"] == 1].copy()
-    else:
-        candidate_df = split_df[split_df["bot_probability"].fillna(0.0) >= threshold].copy()
-        if len(candidate_df) < 10:
-            candidate_df = split_df.nlargest(min(200, len(split_df)), "bot_probability").copy()
-
-    if candidate_df.empty:
-        raise ValueError("No candidate nodes available for clustering.")
-
-    dense_columns = manifest["profile_numeric_columns"] + manifest.get("graph_numeric_columns", []) + manifest.get(
-        "embedding_columns",
-        [column for column in embeddings.columns if column != "user_id"],
-    )
-    candidate_matrix = candidate_df[dense_columns].to_numpy(dtype=np.float32)
-    scaler = StandardScaler()
-    candidate_matrix = scaler.fit_transform(candidate_matrix)
-
-    pca_components = int(min(16, candidate_matrix.shape[0] - 1, candidate_matrix.shape[1]))
-    if pca_components > 1:
-        reducer = PCA(n_components=pca_components, random_state=config.random_state)
-        reduced = reducer.fit_transform(candidate_matrix)
-    else:
-        reduced = candidate_matrix
-
-    if method == "spectral":
-        from sklearn.cluster import SpectralClustering
-
-        n_clusters = max(2, min(8, len(candidate_df) // 20))
-        cluster_labels = SpectralClustering(
-            n_clusters=n_clusters,
-            random_state=config.random_state,
-            affinity="nearest_neighbors",
-            assign_labels="kmeans",
-        ).fit_predict(reduced)
-    else:
-        from sklearn.cluster import DBSCAN
-
-        cluster_labels = DBSCAN(eps=1.6, min_samples=5).fit_predict(reduced)
-
-    candidate_df["cluster_id"] = cluster_labels
-
-    graph_edges = pd.read_csv(config.cache_dir / "graph_edges.csv")
-    graph = nx_from_edges(graph_edges)
-
-    summary_rows = []
-    valid_mask = candidate_df["cluster_id"] != -1
-    valid_clusters = sorted(candidate_df.loc[valid_mask, "cluster_id"].unique().tolist())
-    for cluster_id in valid_clusters:
-        members = candidate_df[candidate_df["cluster_id"] == cluster_id].copy()
-        member_ids = members["user_id"].tolist()
-        subgraph = graph.subgraph(member_ids).copy()
-        bot_ratio = float(members["label_id"].mean()) if len(members) else 0.0
-        density = float(nx_density_safe(subgraph))
-        summary_rows.append(
-            {
-                "cluster_id": int(cluster_id),
-                "size": int(len(members)),
-                "bot_ratio": bot_ratio,
-                "human_ratio": 1.0 - bot_ratio,
-                "density": density,
-                "average_probability": float(members["bot_probability"].fillna(0.0).mean()),
-            }
-        )
-
-    if summary_rows:
-        summary_df = pd.DataFrame(summary_rows).sort_values(["bot_ratio", "density", "size"], ascending=False)
-    else:
-        summary_df = pd.DataFrame(columns=["cluster_id", "size", "bot_ratio", "human_ratio", "density", "average_probability"])
-    purity = cluster_purity(candidate_df)
-    nmi = normalized_mutual_info_score(
-        candidate_df.loc[valid_mask, "label_id"],
-        candidate_df.loc[valid_mask, "cluster_id"],
-    ) if valid_mask.any() else 0.0
-
-    metrics = {
-        "method": method,
-        "split": split,
-        "candidate_count": int(len(candidate_df)),
-        "cluster_count": int(len(valid_clusters)),
-        "purity": float(purity),
-        "nmi": float(nmi),
-        "noise_ratio": float((candidate_df["cluster_id"] == -1).mean()),
-    }
-
-    candidate_df.to_csv(config.tables_dir / "cluster_assignments.csv", index=False)
-    summary_df.to_csv(config.tables_dir / "cluster_summary.csv", index=False)
-    with (config.tables_dir / "cluster_metrics.json").open("w", encoding="utf-8") as handle:
-        json.dump(metrics, handle, ensure_ascii=False, indent=2)
-
-    return candidate_df, summary_df
-
-
-def build_feature_matrices(
-    train_df: pd.DataFrame,
-    val_df: pd.DataFrame,
-    test_df: pd.DataFrame,
-    all_df: pd.DataFrame,
-    numeric_columns: list[str],
-    use_text: bool,
-    text_column: str,
-    tfidf_max_features: int,
-    tfidf_min_df: int,
-) -> dict[str, Any]:
-    scaler = StandardScaler()
-    train_numeric = scaler.fit_transform(train_df[numeric_columns].to_numpy(dtype=np.float32))
-    val_numeric = scaler.transform(val_df[numeric_columns].to_numpy(dtype=np.float32))
-    test_numeric = scaler.transform(test_df[numeric_columns].to_numpy(dtype=np.float32))
-    all_numeric = scaler.transform(all_df[numeric_columns].to_numpy(dtype=np.float32))
-
-    train_dense = train_numeric.astype(np.float32)
-    val_dense = val_numeric.astype(np.float32)
-    test_dense = test_numeric.astype(np.float32)
-    all_dense = all_numeric.astype(np.float32)
-
-    vectorizer = None
-    train_sparse = sparse.csr_matrix(train_dense)
-    val_sparse = sparse.csr_matrix(val_dense)
-    test_sparse = sparse.csr_matrix(test_dense)
-    all_sparse = sparse.csr_matrix(all_dense)
-
-    if use_text:
-        train_text = train_df[text_column].fillna("").astype(str)
-        val_text = val_df[text_column].fillna("").astype(str)
-        test_text = test_df[text_column].fillna("").astype(str)
-        all_text = all_df[text_column].fillna("").astype(str)
-        effective_min_df = min(tfidf_min_df, max(1, len(train_text)))
-        vectorizer = TfidfVectorizer(
-            max_features=tfidf_max_features,
-            min_df=effective_min_df,
-            ngram_range=(1, 2),
-            stop_words="english",
-        )
-        try:
-            X_train_text = vectorizer.fit_transform(train_text)
-        except ValueError:
-            vectorizer = TfidfVectorizer(
-                max_features=tfidf_max_features,
-                min_df=1,
-                ngram_range=(1, 2),
-                stop_words=None,
-            )
-            X_train_text = vectorizer.fit_transform(train_text)
-        X_val_text = vectorizer.transform(val_text)
-        X_test_text = vectorizer.transform(test_text)
-        X_all_text = vectorizer.transform(all_text)
-
-        train_sparse = sparse.hstack([train_sparse, X_train_text], format="csr")
-        val_sparse = sparse.hstack([val_sparse, X_val_text], format="csr")
-        test_sparse = sparse.hstack([test_sparse, X_test_text], format="csr")
-        all_sparse = sparse.hstack([all_sparse, X_all_text], format="csr")
-
-    return {
+        "model": model,
         "scaler": scaler,
         "vectorizer": vectorizer,
-        "train_dense": train_dense,
-        "val_dense": val_dense,
-        "test_dense": test_dense,
-        "all_dense": all_dense,
-        "train_sparse": train_sparse,
-        "val_sparse": val_sparse,
-        "test_sparse": test_sparse,
-        "all_sparse": all_sparse,
+        "numeric_columns": spec.numeric_columns,
+        "text_mode": spec.text_mode,
+        "text_column": spec.text_column,
     }
+    joblib.dump(artifact, config.models_dir / f"{spec.name}.joblib")
+    return {"metrics_rows": metrics_rows, "predictions": predictions, "best_val_f1": metrics_rows[0]["f1"]}
 
 
-def load_cached_artifacts(config: PipelineConfig) -> tuple[pd.DataFrame, dict[str, Any], pd.DataFrame]:
-    users = pd.read_csv(config.cache_dir / "users.csv")
-    with (config.cache_dir / "manifest.json").open("r", encoding="utf-8") as handle:
-        manifest = json.load(handle)
-    for column in manifest.get("profile_numeric_columns", []):
-        if column not in users.columns:
-            users[column] = 0.0
-    for column in manifest.get("graph_numeric_columns", []):
-        if column not in users.columns:
-            users[column] = 0.0
-
-    embedding_path = config.cache_dir / "graph_embeddings.joblib"
-    if not embedding_path.exists():
-        embedding_path = config.cache_dir / "deepwalk_embeddings.joblib"
-    embedding_payload = joblib.load(embedding_path)
-    embeddings = pd.DataFrame(embedding_payload["embeddings"], columns=embedding_payload["columns"])
-    embeddings.insert(0, "user_id", embedding_payload["user_id"])
-    return users, manifest, embeddings
+def _predict_with_probabilities(model: Any, matrix: Any) -> tuple[np.ndarray, np.ndarray]:
+    probabilities = model.predict_proba(matrix)[:, 1]
+    predictions = (probabilities >= 0.5).astype(int)
+    return predictions, probabilities
 
 
-def predict_with_scores(model: Any, features: Any) -> tuple[np.ndarray, np.ndarray]:
-    predictions = model.predict(features)
-    if hasattr(model, "predict_proba"):
-        probabilities = model.predict_proba(features)[:, 1]
-    elif hasattr(model, "decision_function"):
-        decision = model.decision_function(features)
-        probabilities = 1.0 / (1.0 + np.exp(-decision))
-    else:
-        probabilities = predictions.astype(np.float32)
-    return predictions.astype(int), probabilities.astype(np.float32)
+def _prediction_frame(
+    spec: ExperimentSpec,
+    split_name: str,
+    user_ids: pd.Series,
+    y_true: np.ndarray,
+    y_pred: np.ndarray,
+    probabilities: np.ndarray,
+) -> pd.DataFrame:
+    return pd.DataFrame(
+        {
+            "experiment": spec.name,
+            "family": spec.family,
+            "split": split_name,
+            "user_id": user_ids.to_numpy(),
+            "true_label": y_true,
+            "pred_label": y_pred,
+            "bot_probability": probabilities,
+        }
+    )
 
 
-def evaluate_predictions(y_true: np.ndarray, y_pred: np.ndarray, y_score: np.ndarray) -> dict[str, float]:
+def _compute_metrics(y_true: np.ndarray, y_pred: np.ndarray, probabilities: np.ndarray) -> dict[str, float]:
     precision, recall, f1, _ = precision_recall_fscore_support(y_true, y_pred, average="binary", zero_division=0)
-    metrics = {
+    try:
+        auc_roc = roc_auc_score(y_true, probabilities)
+    except ValueError:
+        auc_roc = float("nan")
+    return {
         "accuracy": float(accuracy_score(y_true, y_pred)),
         "precision": float(precision),
         "recall": float(recall),
         "f1": float(f1),
-        "auc_roc": float(roc_auc_score(y_true, y_score)) if len(np.unique(y_true)) > 1 else 0.0,
+        "auc_roc": float(auc_roc),
     }
-    return metrics
 
 
-def cluster_purity(candidate_df: pd.DataFrame) -> float:
-    clustered = candidate_df[candidate_df["cluster_id"] != -1]
-    if clustered.empty:
-        return 0.0
-    purity_numerator = 0
-    for _, group in clustered.groupby("cluster_id"):
-        purity_numerator += int(group["label_id"].value_counts().max())
-    return float(purity_numerator / len(clustered))
+def _build_family_summary(metrics_df: pd.DataFrame) -> pd.DataFrame:
+    if metrics_df.empty:
+        return pd.DataFrame(columns=["family", "split", "best_experiment", "f1", "auc_roc"])
+    best_rows = []
+    for (family, split_name), group in metrics_df.groupby(["family", "split"], sort=False):
+        best = group.sort_values(["f1", "auc_roc"], ascending=False).iloc[0]
+        best_rows.append(
+            {
+                "family": family,
+                "split": split_name,
+                "best_experiment": best["experiment"],
+                "accuracy": best["accuracy"],
+                "precision": best["precision"],
+                "recall": best["recall"],
+                "f1": best["f1"],
+                "auc_roc": best["auc_roc"],
+            }
+        )
+    return pd.DataFrame(best_rows).sort_values(["split", "f1"], ascending=[True, False]).reset_index(drop=True)
 
 
-def nx_from_edges(edge_df: pd.DataFrame):
-    import networkx as nx
+class Node2VecCorpus:
+    def __init__(
+        self,
+        graph: nx.Graph,
+        walk_length: int,
+        num_walks: int,
+        seed: int,
+        return_p: float,
+        inout_q: float,
+    ) -> None:
+        self.graph = graph
+        self.walk_length = walk_length
+        self.num_walks = num_walks
+        self.seed = seed
+        self.return_p = max(return_p, 1e-6)
+        self.inout_q = max(inout_q, 1e-6)
 
-    graph = nx.Graph()
-    for row in edge_df.itertuples(index=False):
-        graph.add_edge(row.source_id, row.target_id, weight=float(row.weight))
-    return graph
+    def __iter__(self):
+        rng = random.Random(self.seed)
+        nodes = list(self.graph.nodes())
+        for _ in range(self.num_walks):
+            rng.shuffle(nodes)
+            for node in nodes:
+                yield self._walk(node, rng)
+
+    def _walk(self, start: str, rng: random.Random) -> list[str]:
+        walk = [start]
+        while len(walk) < self.walk_length:
+            current = walk[-1]
+            neighbors = list(self.graph.neighbors(current))
+            if not neighbors:
+                break
+            if len(walk) == 1:
+                walk.append(rng.choice(neighbors))
+                continue
+            previous = walk[-2]
+            weights = []
+            for neighbor in neighbors:
+                base_weight = float(self.graph[current][neighbor].get("weight", 1.0))
+                if neighbor == previous:
+                    bias = 1.0 / self.return_p
+                elif self.graph.has_edge(previous, neighbor):
+                    bias = 1.0
+                else:
+                    bias = 1.0 / self.inout_q
+                weights.append(base_weight * bias)
+            walk.append(_weighted_choice(neighbors, weights, rng))
+        return walk
 
 
-def nx_density_safe(graph) -> float:
-    import networkx as nx
+def _weighted_choice(items: list[str], weights: list[float], rng: random.Random) -> str:
+    total = sum(weights)
+    if total <= 0:
+        return rng.choice(items)
+    threshold = rng.random() * total
+    cumulative = 0.0
+    for item, weight in zip(items, weights):
+        cumulative += weight
+        if cumulative >= threshold:
+            return item
+    return items[-1]
 
-    if graph.number_of_nodes() <= 1:
-        return 0.0
-    return float(nx.density(graph))
+
+def _prepare_numeric_frame(frame: pd.DataFrame, columns: list[str]) -> pd.DataFrame:
+    if not columns:
+        return pd.DataFrame(index=frame.index)
+    numeric = frame.reindex(columns=columns, fill_value=0.0).copy()
+    for column in numeric.columns:
+        numeric[column] = pd.to_numeric(numeric[column], errors="coerce")
+    return numeric.fillna(0.0)
+
+
+def _is_valid_embedding_cache(
+    frame: pd.DataFrame,
+    expected_user_ids: pd.Series,
+    prefix: str,
+    expected_dim: int | None = None,
+) -> bool:
+    if "user_id" not in frame.columns:
+        return False
+    embedding_columns = [column for column in frame.columns if column.startswith(prefix)]
+    if expected_dim is not None and len(embedding_columns) != expected_dim:
+        return False
+    expected_ids = set(expected_user_ids.astype(str).tolist())
+    cached_ids = set(frame["user_id"].astype(str).tolist())
+    if expected_ids != cached_ids:
+        return False
+    if frame["user_id"].duplicated().any():
+        return False
+    if embedding_columns and frame[embedding_columns].isna().any().any():
+        return False
+    return True

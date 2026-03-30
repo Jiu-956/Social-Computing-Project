@@ -1,5 +1,1 @@
-"""Standardized experiment code package."""
-
-from .config import PipelineConfig
-
-__all__ = ["PipelineConfig"]
+"""TwiBot-20 bot detection research framework."""

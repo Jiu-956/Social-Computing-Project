@@ -1,206 +1,90 @@
 from __future__ import annotations
 
-import json
-import logging
-
+import joblib
 import matplotlib
+import pandas as pd
+from sklearn.decomposition import PCA
+
+from .config import ProjectConfig
 
 matplotlib.use("Agg")
-
 import matplotlib.pyplot as plt
-import networkx as nx
-import pandas as pd
-import seaborn as sns
-from sklearn.decomposition import PCA
-from sklearn.manifold import TSNE
-from sklearn.preprocessing import StandardScaler
-
-from .config import PipelineConfig
-from .experiments import load_cached_artifacts
-
-LOGGER = logging.getLogger(__name__)
 
 
-def generate_visualizations(config: PipelineConfig) -> None:
-    users, _, embeddings = load_cached_artifacts(config)
-    users = users.merge(embeddings, on="user_id", how="left").fillna(0.0)
+def generate_visualizations(config: ProjectConfig) -> None:
+    metrics_path = config.tables_dir / "experiment_metrics.csv"
+    if not metrics_path.exists():
+        raise FileNotFoundError("experiment_metrics.csv does not exist. Run the training step first.")
 
-    prediction_path = config.tables_dir / "classification_predictions.csv"
-    cluster_path = config.tables_dir / "cluster_assignments.csv"
-    community_path = config.tables_dir / "community_summary.csv"
-    edge_path = config.cache_dir / "graph_edges.csv"
-
-    if prediction_path.exists():
-        predictions = pd.read_csv(prediction_path)
-        best_info = json.loads((config.models_dir / "best_experiment.json").read_text(encoding="utf-8"))
-        predictions = predictions[predictions["experiment"] == best_info["best_experiment"]]
-        users = users.merge(
-            predictions[["user_id", "bot_probability", "prediction"]],
-            on="user_id",
-            how="left",
-        )
-
-    if cluster_path.exists():
-        clusters = pd.read_csv(cluster_path)
-        users = users.merge(clusters[["user_id", "cluster_id"]], on="user_id", how="left")
-
-    plot_degree_distribution(users, config)
-    plot_embedding_map(users, config)
-    if community_path.exists():
-        plot_community_modularity(pd.read_csv(community_path), config)
-
-    if edge_path.exists() and cluster_path.exists():
-        plot_suspicious_cluster(users, pd.read_csv(edge_path), config)
+    metrics = pd.read_csv(metrics_path, low_memory=False)
+    users = pd.read_csv(config.cache_dir / "users.csv", low_memory=False)
+    _plot_model_comparison(metrics, config)
+    _plot_node2vec_projection(users, config)
+    _plot_feature_importance(config)
 
 
-def plot_degree_distribution(users: pd.DataFrame, config: PipelineConfig) -> None:
-    figure, axis = plt.subplots(figsize=(8, 5))
-    sns.histplot(
-        data=users,
-        x="graph_total_degree",
-        hue="label",
-        bins=40,
-        stat="density",
-        common_norm=False,
-        alpha=0.4,
-        ax=axis,
-    )
-    axis.set_title("Degree Distribution by Label")
-    axis.set_xlabel("Graph total degree")
-    figure.tight_layout()
-    figure.savefig(config.figures_dir / "degree_distribution.png", dpi=180)
-    plt.close(figure)
+def _plot_model_comparison(metrics: pd.DataFrame, config: ProjectConfig) -> None:
+    test_metrics = metrics[metrics["split"] == "test"].sort_values("f1", ascending=True)
+    if test_metrics.empty:
+        return
+    plt.figure(figsize=(11, 7))
+    plt.barh(test_metrics["experiment"], test_metrics["f1"], color="#4472c4")
+    plt.xlabel("F1-score")
+    plt.title("TwiBot-20 Test F1 Comparison")
+    plt.tight_layout()
+    plt.savefig(config.figures_dir / "model_comparison.png", dpi=200)
+    plt.close()
 
 
-def plot_embedding_map(users: pd.DataFrame, config: PipelineConfig) -> None:
-    embedding_columns = [column for column in users.columns if column.startswith("dw_")]
+def _plot_node2vec_projection(users: pd.DataFrame, config: ProjectConfig) -> None:
+    embedding_path = config.cache_dir / "node2vec_embeddings.csv"
+    if not embedding_path.exists():
+        return
+    embeddings = pd.read_csv(embedding_path, low_memory=False)
+    labeled = users[users["label_id"] >= 0].merge(embeddings, on="user_id", how="inner")
+    if labeled.empty:
+        return
+
+    if len(labeled) > config.visualization_sample_size:
+        per_class = max(1, config.visualization_sample_size // max(1, labeled["label_id"].nunique()))
+        sampled_groups = []
+        for _, group in labeled.groupby("label_id", sort=False):
+            sampled_groups.append(group.sample(n=min(len(group), per_class), random_state=config.random_state))
+        labeled = pd.concat(sampled_groups, ignore_index=True)
+
+    embedding_columns = [column for column in labeled.columns if column.startswith("n2v_")]
     if not embedding_columns:
-        LOGGER.warning("No DeepWalk columns found; skipping embedding plot.")
         return
+    projected = PCA(n_components=2, random_state=config.random_state).fit_transform(labeled[embedding_columns])
+    colors = labeled["label_id"].map({0: "#2ca02c", 1: "#d62728"}).to_numpy()
 
-    sample_size = min(config.tsne_sample_size, len(users))
-    label_count = max(1, users["label"].nunique())
-    sample_per_label = max(1, sample_size // label_count)
-    sampled_frames = []
-    for _, frame in users.groupby("label", sort=False):
-        sampled_frames.append(
-            frame.sample(
-                n=min(sample_per_label, len(frame)),
-                random_state=config.random_state,
-            )
-        )
-    sample = pd.concat(sampled_frames, ignore_index=True)
-    sample = sample.drop_duplicates("user_id").reset_index(drop=True)
+    plt.figure(figsize=(8, 6))
+    plt.scatter(projected[:, 0], projected[:, 1], c=colors, alpha=0.7, s=12)
+    plt.title("Node2Vec 2D Projection")
+    plt.xlabel("PC1")
+    plt.ylabel("PC2")
+    plt.tight_layout()
+    plt.savefig(config.figures_dir / "node2vec_projection.png", dpi=200)
+    plt.close()
 
-    scaler = StandardScaler()
-    matrix = scaler.fit_transform(sample[embedding_columns].to_numpy(dtype=float))
-    pca_components = min(32, matrix.shape[0] - 1, matrix.shape[1])
-    if pca_components > 1:
-        matrix = PCA(n_components=pca_components, random_state=config.random_state).fit_transform(matrix)
 
-    perplexity = min(30, max(5, len(sample) // 20))
-    projection = TSNE(
-        n_components=2,
-        learning_rate="auto",
-        init="pca",
-        perplexity=perplexity,
-        random_state=config.random_state,
-    ).fit_transform(matrix)
-
-    plot_df = sample[["user_id", "label"]].copy()
-    plot_df["x"] = projection[:, 0]
-    plot_df["y"] = projection[:, 1]
-    if "cluster_id" in sample:
-        plot_df["cluster_id"] = sample["cluster_id"]
-
-    figure, axis = plt.subplots(figsize=(8, 6))
-    sns.scatterplot(
-        data=plot_df,
-        x="x",
-        y="y",
-        hue="label",
-        style="label",
-        alpha=0.8,
-        s=35,
-        ax=axis,
+def _plot_feature_importance(config: ProjectConfig) -> None:
+    artifact_path = config.models_dir / "feature_only_random_forest.joblib"
+    if not artifact_path.exists():
+        return
+    artifact = joblib.load(artifact_path)
+    model = artifact.get("model")
+    columns = artifact.get("numeric_columns", [])
+    if not hasattr(model, "feature_importances_"):
+        return
+    importance = pd.DataFrame({"feature": columns, "importance": model.feature_importances_}).sort_values(
+        "importance",
+        ascending=False,
     )
-    axis.set_title("t-SNE of DeepWalk Embeddings")
-    axis.set_xlabel("Component 1")
-    axis.set_ylabel("Component 2")
-    figure.tight_layout()
-    figure.savefig(config.figures_dir / "embedding_tsne.png", dpi=180)
-    plt.close(figure)
-
-
-def plot_suspicious_cluster(users: pd.DataFrame, edges: pd.DataFrame, config: PipelineConfig) -> None:
-    if "cluster_id" not in users:
-        return
-
-    clustered = users.dropna(subset=["cluster_id"]).copy()
-    clustered = clustered[clustered["cluster_id"] != -1]
-    if clustered.empty:
-        return
-
-    ranked = (
-        clustered.groupby("cluster_id")
-        .agg(size=("user_id", "size"), bot_ratio=("label_id", "mean"))
-        .sort_values(["bot_ratio", "size"], ascending=False)
-    )
-    chosen_cluster_id = ranked.index[0]
-    cluster_users = clustered[clustered["cluster_id"] == chosen_cluster_id].copy()
-    cluster_ids = cluster_users["user_id"].tolist()
-
-    graph = nx.Graph()
-    for row in edges.itertuples(index=False):
-        if row.source_id in cluster_ids and row.target_id in cluster_ids:
-            graph.add_edge(row.source_id, row.target_id, weight=float(row.weight))
-
-    if graph.number_of_nodes() == 0:
-        return
-
-    if graph.number_of_nodes() > 80:
-        ranked_nodes = sorted(graph.degree, key=lambda item: item[1], reverse=True)[:80]
-        graph = graph.subgraph([node for node, _ in ranked_nodes]).copy()
-
-    node_df = cluster_users.set_index("user_id").loc[list(graph.nodes())]
-    node_colors = node_df["label"].map({"bot": "#d95f02", "human": "#1b9e77"}).tolist()
-
-    figure, axis = plt.subplots(figsize=(9, 7))
-    position = nx.spring_layout(graph, seed=config.random_state)
-    nx.draw_networkx(
-        graph,
-        pos=position,
-        node_size=180,
-        node_color=node_colors,
-        edge_color="#b3b3b3",
-        with_labels=False,
-        alpha=0.9,
-        ax=axis,
-    )
-    axis.set_title(f"Top Suspicious Cluster ({int(chosen_cluster_id)})")
-    axis.axis("off")
-    figure.tight_layout()
-    figure.savefig(config.figures_dir / "top_suspicious_cluster.png", dpi=180)
-    plt.close(figure)
-
-
-def plot_community_modularity(summary_df: pd.DataFrame, config: PipelineConfig) -> None:
-    if summary_df.empty or "modularity" not in summary_df.columns:
-        return
-
-    figure, axis = plt.subplots(figsize=(8, 5))
-    sns.barplot(
-        data=summary_df,
-        x="method",
-        y="modularity",
-        hue="method",
-        palette="crest",
-        legend=False,
-        ax=axis,
-    )
-    axis.set_title("Community Modularity by Method")
-    axis.set_xlabel("Community method")
-    axis.set_ylabel("Modularity")
-    figure.tight_layout()
-    figure.savefig(config.figures_dir / "community_modularity.png", dpi=180)
-    plt.close(figure)
+    importance = importance.head(12).sort_values("importance", ascending=True)
+    plt.figure(figsize=(10, 6))
+    plt.barh(importance["feature"], importance["importance"], color="#ed7d31")
+    plt.title("Top Feature Importances")
+    plt.tight_layout()
+    plt.savefig(config.figures_dir / "feature_importance.png", dpi=200)
+    plt.close()
