@@ -1,26 +1,23 @@
 # 方法文档
 
-## 1. 设计目标
+## 1. 方法设计不再只围绕“谁分数最高”
 
-本项目围绕 `TwiBot-20` 机器人检测任务，按照论文和官方仓库中的思路，把方法划分为六类：
+本项目现在用统一框架回答三个研究问题：
 
-- 基于特征（F）
-- 基于文本（T）
-- 基于图（G）
-- 基于特征和文本（FT）
-- 基于特征和图（FG）
-- 基于特征、文本和图（FTG）
+1. 哪类信息更有效？
+2. 不同方法差异在哪里？
+3. 结果是否可解释？
 
-这样做的目的不是只找一个分数最高的模型，而是系统回答：
+因此，方法文档的组织顺序也对应调整为：
 
-1. 用户画像信息是否足够识别 bot？
-2. 文本语义是否比传统特征更有效？
-3. 图结构能否补充单账号信息？
-4. 当特征、文本和图一起使用时，是否能进一步提升？
+- 数据如何被整理成统一输入；
+- 六类方法如何映射到研究问题；
+- 解释性分析如何和实验结果接起来；
+- 哪些代码模块分别负责训练、解释和可视化。
 
-## 2. 数据处理思路
+## 2. 数据组织与输入表示
 
-### 2.1 输入文件
+### 2.1 原始输入文件
 
 项目直接使用 `TwiBot-20` 原始文件：
 
@@ -29,293 +26,270 @@
 - `data/edge.csv`
 - `data/node.json`
 
-### 2.2 流式解析
+### 2.2 为什么使用流式解析
 
-`node.json` 体积很大，因此代码没有一次性全部读入，而是用流式方式逐条解析 JSON 数组。
+`node.json` 体积很大，因此代码不会一次性全部读入内存，而是流式解析 JSON 数组。
 
 对应实现：
 
 - `code/data.py`
 
-### 2.3 用户级样本
+### 2.3 用户级样本包含什么
 
-最终整理出的用户级样本包括：
+数据准备结束后，用户级样本会统一整理为：
 
-- 用户 id
-- train / val / test / support 划分
-- bot / human 标签
-- 简介文本 `description_text`
-- tweet 合并文本 `tweet_text`
-- 综合文本 `combined_text`
+- `user_id`
+- `split`：`train / val / test / support`
+- `label_id`：`机器人 / 人类`
+- `description_text`
+- `tweet_text`
+- `combined_text`
 - 用户属性特征
-- 图统计特征
+- 图结构统计特征
 
 ### 2.4 为什么保留 support 节点
 
-`support` 节点没有分类标签，但它们是图结构的一部分。对于 GCN、GAT、BotRGCN 这类图神经网络来说，support 节点能提供邻居上下文，因此不能简单删除。
+`support` 节点没有分类标签，但它们仍然是图的一部分。对于 `GCN`、`GAT`、`BotRGCN` 这类图神经网络，support 节点能提供邻居上下文，因此不能简单删除。
 
-## 3. 特征构建
+## 3. 六类方法如何映射到三个问题
 
-### 3.1 基于特征的方法所用特征
+### 3.1 问题一：哪类信息更有效？
 
-这类方法只使用用户画像和账号属性，不使用文本编码和图卷积。
+这一步首先看单源方法：
 
-主要特征包括：
+- F：只看用户属性
+- T：只看文本语义
+- G：只看图结构
 
-- 粉丝数 `followers_count`
-- 关注数 `following_count`
-- 发文数 `tweet_count`
-- 列表数 `listed_count`
-- 账号年龄 `account_age_days`
-- 用户名长度 `username_length`
-- 显示名长度 `display_name_length`
-- 简介长度 `description_length`
-- 是否有 location
-- 是否有 URL
-- 是否认证 `is_verified`
-- 是否保护账号 `is_protected`
-- 默认头像特征 `default_profile_image`
-- 粉丝关注比
-- 日均发文
-- 对数变换后的计数特征
+然后再看双源和三源方法：
 
-### 3.2 图结构统计特征
+- FT：属性 + 文本
+- FG：属性 + 图
+- FTG：属性 + 文本 + 图
 
-这类特征来自 `edge.csv`：
+因此，“哪类信息更有效”不是只比较一个模型，而是比较六类方法族之间的表现，以及加入某类信息后平均会带来多少增益。
 
-- `follow_in_count`
-- `follow_out_count`
-- `friend_in_count`
-- `friend_out_count`
-- `total_in_degree`
-- `total_out_degree`
-- `in_out_ratio`
-- `friend_share_out`
-- `follow_share_out`
-- `post_count`
-- `sampled_tweet_count`
+### 3.2 问题二：不同方法差异在哪里？
 
-这些特征可以单独作为“基于图”方法的一部分，也可以与用户属性一起构成“基于特征和图”方法。
+这里主要看两层差异：
 
-## 4. 六类方法详细说明
+#### 第一层：信息差异
+
+例如：
+
+- 从 `text_only` 到 `feature_text`，是在“只用文本”基础上增加了用户属性；
+- 从 `feature_text` 到 `feature_text_graph`，是在“属性 + 文本”基础上增加了图结构。
+
+这层差异由：
+
+- `source_contribution_details.csv`
+
+来描述。
+
+#### 第二层：融合机制差异
+
+即使都使用特征、文本、图三类信息，不同方法仍然会不同：
+
+- `feature_text_graph_tfidf_node2vec_logistic_regression`
+- `feature_text_graph_gcn`
+- `feature_text_graph_gat`
+- `feature_text_graph_botrgcn`
+
+这里的差异来自：
+
+- 简单拼接 vs 图传播
+- 普通图卷积 vs 注意力传播
+- 同质传播 vs 关系感知传播
+
+### 3.3 问题三：结果是否可解释？
+
+这一步不只看分数，而是做两类解释：
+
+#### 信息源层面的解释
+
+- 平均增益：加入某类信息后平均提升多少；
+- 消融实验：在最佳可解释融合基线中，移除某类信息后损失多少。
+
+#### 信号层面的解释
+
+- 用户属性：模型主要在看哪些账号画像异常；
+- 文本语义：模型主要抓哪些词或短语；
+- 图结构：模型主要抓哪些关系模式。
+
+## 4. 六类方法本身的角色
 
 ## 4.1 基于特征（F）
 
-### 方法 1：`feature_only_logistic_regression`
+### `feature_only_logistic_regression`
 
-思路：
+- 只使用用户属性特征；
+- 适合作为最直接、最可解释的基线；
+- 有助于回答“单看账号画像是否足够识别机器人”。
 
-- 把每个用户看成一个独立样本
-- 只使用用户属性特征
-- 用逻辑回归完成 bot / human 二分类
+### `feature_only_random_forest`
 
-优点：
-
-- 可解释性强
-- 训练快
-- 适合作为基线
-
-局限：
-
-- 不利用文本语义
-- 不利用图结构
-
-### 方法 2：`feature_only_random_forest`
-
-思路：
-
-- 使用同样的用户属性特征
-- 用随机森林替代逻辑回归
-
-优点：
-
-- 能处理非线性关系
-- 能输出特征重要性
-
-局限：
-
-- 仍然不利用文本和图
+- 仍然只使用用户属性；
+- 允许非线性关系；
+- 可直接输出特征重要性，适合做解释性图表。
 
 ## 4.2 基于文本（T）
 
-### 方法 1：`text_only_tfidf_logistic_regression`
+### `text_only_tfidf_logistic_regression`
 
-思路：
+- 把简介和 tweet 合并为文本；
+- 使用 TF-IDF；
+- 适合抓关键词和短语层面的可解释信号。
 
-- 把简介和 tweet 合并成文本
-- 使用 `TF-IDF` 提取稀疏文本特征
-- 用逻辑回归分类
+### `text_only_transformer_logistic_regression`
 
-适合回答的问题：
-
-- 单看文本内容，能否识别机器人？
-
-### 方法 2：`text_only_transformer_logistic_regression`
-
-思路：
-
-- 用 `SentenceTransformer` 生成稠密文本表示
-- 仅使用文本嵌入进行分类
-
-与 TF-IDF 的区别：
-
-- TF-IDF 更偏关键词
-- Transformer 更偏语义相似性
+- 使用 SentenceTransformer 生成稠密文本表示；
+- 更偏语义相似性；
+- 适合与 TF-IDF 对照，观察“关键词”和“语义嵌入”谁更有效。
 
 ## 4.3 基于图（G）
 
-### 方法 1：`graph_only_structure_random_forest`
+### `graph_only_structure_random_forest`
 
-思路：
+- 只使用结构统计特征；
+- 用来回答“网络连接形态本身是否足够区分机器人和人类”。
 
-- 只使用图结构统计特征
-- 不使用用户属性和文本
+### `graph_only_node2vec_logistic_regression`
 
-它回答的问题是：
-
-- 仅从网络连接形态，能否区分 bot 和 human？
-
-### 方法 2：`graph_only_node2vec_logistic_regression`
-
-思路：
-
-- 用 `Node2Vec` 对用户关系图做随机游走
-- 使用 `Word2Vec` 训练节点嵌入
-- 把节点嵌入送入逻辑回归
-
-意义：
-
-- 不再只看度数，而是学习节点在整个图中的结构角色
+- 用 `Node2Vec` 学习节点在图中的结构角色；
+- 比单纯度数统计更强调整体拓扑位置。
 
 ## 4.4 基于特征和文本（FT）
 
-### 方法 1：`feature_text_tfidf_logistic_regression`
+### `feature_text_tfidf_logistic_regression`
 
-思路：
+- 将用户属性与 TF-IDF 拼接；
+- 是最直接的“结构化特征 + 文本关键词”融合基线。
 
-- 将用户属性特征和 TF-IDF 文本特征拼接
-- 再用逻辑回归分类
+### `feature_text_transformer_logistic_regression`
 
-这是最直接的多模态融合方式之一。
-
-### 方法 2：`feature_text_transformer_logistic_regression`
-
-思路：
-
-- 将用户属性特征和 Transformer 文本嵌入拼接
-- 用逻辑回归分类
-
-适合检验：
-
-- 文本语义与结构化属性是否互补
+- 将用户属性与 Transformer 文本嵌入拼接；
+- 检查“文本语义与结构化属性是否互补”。
 
 ## 4.5 基于特征和图（FG）
 
-### 方法 1：`feature_graph_random_forest`
+### `feature_graph_random_forest`
 
-思路：
+- 将用户属性与图统计特征一起输入；
+- 适合观察“加图统计后是否稳定提升”。
 
-- 将用户属性特征与图统计特征一起输入随机森林
+### `feature_graph_node2vec_logistic_regression`
 
-### 方法 2：`feature_graph_node2vec_logistic_regression`
-
-思路：
-
-- 将用户属性特征、图统计特征、Node2Vec 图嵌入拼接
-- 用逻辑回归分类
-
-意义：
-
-- 同时利用用户画像和节点在网络中的位置表示
+- 将用户属性、图统计和图嵌入一起输入；
+- 用于观察“账号画像 + 网络位置”是否互补。
 
 ## 4.6 基于特征、文本和图（FTG）
 
-这是当前最重要的一组方法，也最接近论文和官方仓库。
+### `feature_text_graph_tfidf_node2vec_logistic_regression`
 
-### 方法 1：`feature_text_graph_tfidf_node2vec_logistic_regression`
+- 把属性、TF-IDF 文本、Node2Vec 一起拼接；
+- 是非 GNN 的可解释融合基线；
+- 适合做消融分析。
 
-思路：
+### `feature_text_graph_gcn`
 
-- 将用户属性、TF-IDF 文本特征、图嵌入一起拼接
-- 用逻辑回归分类
+- 输入 description、tweet、数值属性、类别属性和边；
+- 用 `GCNConv` 在图上传播；
+- 对应最基础的图神经融合方式。
 
-这是一个“非神经网络”的 FTG 融合基线。
+### `feature_text_graph_gat`
 
-### 方法 2：`feature_text_graph_gcn`
+- 输入结构与 GCN 相同；
+- 用 `GATConv` 对不同邻居分配不同权重；
+- 适合观察注意力传播是否优于普通卷积。
 
-思路：
+### `feature_text_graph_botrgcn`
 
-- 输入四块信息：
-  - 描述文本稠密表示
-  - tweet 文本稠密表示
-  - 数值属性
-  - 类别属性
-- 先分别线性映射，再拼接
-- 用两层 `GCNConv` 在图上传播
-- 最后输出二分类结果
+- 输入结构与 GCN/GAT 相同；
+- 用 `RGCNConv` 区分 `follow` 与 `friend` 等关系类型；
+- 适合回答“图结构是否只有在关系感知传播里才真正发挥作用”。
 
-这对应官方仓库中 GCN 的思路。
+## 5. 解释性分析模块现在负责什么
 
-### 方法 3：`feature_text_graph_gat`
+对应实现：
 
-思路：
+- `code/interpretation.py`
 
-- 输入结构与 GCN 相同
-- 图卷积层替换为 `GATConv`
+它现在负责三类输出：
 
-与 GCN 的区别：
+### 5.1 信息源平均增益
 
-- GAT 不把邻居一视同仁
-- 它会学习不同邻居的重要性
+输出：
 
-### 方法 4：`feature_text_graph_botrgcn`
+- `artifacts/tables/source_contribution_summary.csv`
+- `artifacts/tables/source_contribution_details.csv`
 
-思路：
+作用：
 
-- 输入结构与 GCN/GAT 相同
-- 图层替换为 `RGCNConv`
-- 区分不同关系类型，例如 `follow` 和 `friend`
+- 说明加入用户属性、文本语义、图结构后，平均会带来多大提升；
+- 说明哪些方法差异来自“增加了什么信息”。
 
-这是本项目最接近论文 `BotRGCN` 的实现。
+### 5.2 融合模型消融
 
-它的核心假设是：
+输出：
 
-- 不同关系边的传播语义不同
-- 因此消息传播时不能把所有边都当成一种连接
+- `artifacts/tables/source_ablation.csv`
 
-## 5. 为什么现在的图模型更接近论文
+作用：
 
-原始简化版图模型的问题是：
+- 说明在最佳可解释融合基线中，哪类信息是核心输入，哪类信息只是边际补充。
 
-- 只喂了简化后的数值输入
-- 没有把描述文本和 tweet 文本分别编码
-- 关系感知做得不够充分
+### 5.3 解释性信号表
 
-这次改进后，图模型更接近官方仓库：
+输出：
 
-1. 输入分成 description / tweet / num_prop / cat_prop 四块
-2. 加入 `GCN`、`GAT` 和 `BotRGCN`
-3. `BotRGCN` 使用关系类型感知的 `RGCNConv`
+- `artifacts/tables/feature_signals.csv`
+- `artifacts/tables/text_signals.csv`
+- `artifacts/tables/graph_signals.csv`
 
-## 6. 与官方仓库的一致与差异
+作用：
 
-一致之处：
+- 用户属性：哪些账号特征更像机器人，哪些更像人类；
+- 文本：哪些关键词/短语更像机器人，哪些更像人类；
+- 图结构：哪些结构统计模式更像机器人，哪些更像人类。
 
-- 方法分组采用 F / T / G / FT / FG / FTG
-- FTG 图模型使用描述文本、tweet 文本、数值属性、类别属性、图边
-- 引入 GCN、GAT、BotRGCN 三种图神经网络
+## 6. 可视化模块现在回答什么
 
-差异之处：
+对应实现：
 
-- 官方仓库在文本编码中大量使用 RoBERTa 特征
-- 本项目为了兼顾本地可运行性，文本部分同时保留 TF-IDF 和轻量 Transformer
-- 图模型是论文思路的课程项目级实现，而不是完全逐文件复现官方代码
+- `code/visualization.py`
 
-## 7. 输出文件说明
+现在新增并重点维护三张问题导向图：
 
-- `artifacts/tables/experiment_metrics.csv`：所有模型的验证集/测试集指标
-- `artifacts/tables/family_summary.csv`：六类方法各自最优模型
-- `artifacts/tables/experiment_predictions.csv`：逐用户预测结果
-- `artifacts/models/`：模型缓存
-- `artifacts/figures/`：图表
-- `artifacts/report.md`：自动汇总的实验报告
+- `artifacts/figures/information_effectiveness.png`
+  回答“哪类信息更有效”。
+
+- `artifacts/figures/method_differences.png`
+  回答“不同方法差异在哪里”。
+
+- `artifacts/figures/explainability_signals.png`
+  回答“结果是否可解释”。
+
+- `artifacts/figures/feature_signal_map.png`
+  把“重要特征”与“机器人 / 人类方向差异”放在一张图里。
+
+- `artifacts/figures/embedding_separation_map.png`
+  展示文本语义嵌入和图嵌入在二维空间里的类分布与重叠程度。
+
+- `artifacts/figures/local_network_patterns.png`
+  展示高置信机器人 / 人类的局部网络子图和关注 / 好友关系模式。
+
+当前保留的核心图主要就是上面这几张，目的是让汇报时始终围绕“整体表现 -> 信息贡献 -> 可解释性”这一条主线展开，而不是再回到零散的中间分析图。
+
+## 7. 报告模块现在怎么组织
+
+对应实现：
+
+- `code/reporting.py`
+
+生成的 `artifacts/report.md` 现在不再按“先贴一堆排行榜，再做零散解释”的方式组织，而是直接按三个问题展开：
+
+1. 哪类信息更有效？
+2. 不同方法差异在哪里？
+3. 结果是否可解释？
+
+这样 `README`、方法文档、可视化、自动报告会保持同一条逻辑主线，而不是各写各的。
