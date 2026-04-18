@@ -95,6 +95,7 @@ def prepare_dataset(config: ProjectConfig) -> PreparedDataset:
         node_path=config.data_dir / "node.json",
         graph_user_ids=graph_user_ids,
         sampled_posts=sampled_posts,
+        snapshot_count=config.temporal_snapshot_count,
     )
 
     merged = users.merge(profile_df, on="user_id", how="left").merge(graph_stats, on="user_id", how="left")
@@ -108,8 +109,11 @@ def prepare_dataset(config: ProjectConfig) -> PreparedDataset:
         _feature_numeric_columns()
         + _feature_categorical_columns()
         + _graph_structural_columns()
+        + _time_proxy_columns()
+        + _temporal_snapshot_columns(config.temporal_snapshot_count)
         + _gnn_num_property_columns()
         + _gnn_cat_property_columns()
+        + _gnn_time_columns()
     )
     numeric_columns = list(dict.fromkeys(numeric_columns))
     for column in numeric_columns:
@@ -127,8 +131,12 @@ def prepare_dataset(config: ProjectConfig) -> PreparedDataset:
         "feature_numeric_columns": _feature_numeric_columns(),
         "feature_categorical_columns": _feature_categorical_columns(),
         "graph_structural_columns": _graph_structural_columns(),
+        "time_proxy_columns": _time_proxy_columns(),
+        "temporal_snapshot_columns": _temporal_snapshot_columns(config.temporal_snapshot_count),
+        "temporal_snapshot_count": int(config.temporal_snapshot_count),
         "gnn_num_property_columns": _gnn_num_property_columns(),
         "gnn_cat_property_columns": _gnn_cat_property_columns(),
+        "gnn_time_columns": _gnn_time_columns(),
         "graph_relation_types": ["follow", "friend"],
     }
     summary = {
@@ -263,10 +271,11 @@ def _parse_nodes(
     node_path: Path,
     graph_user_ids: set[str],
     sampled_posts: dict[str, list[str]],
+    snapshot_count: int,
 ) -> tuple[pd.DataFrame, pd.DataFrame]:
     now = datetime.now(timezone.utc)
     profile_rows: dict[str, dict[str, Any]] = {}
-    tweet_lookup: dict[str, str] = {}
+    tweet_lookup: dict[str, dict[str, Any]] = {}
     target_tweet_ids = {tweet_id for tweet_ids in sampled_posts.values() for tweet_id in tweet_ids}
     remaining_users = set(graph_user_ids)
     remaining_tweets = set(target_tweet_ids)
@@ -279,7 +288,7 @@ def _parse_nodes(
             profile_rows[record_id] = _extract_profile_row(record, now)
             remaining_users.remove(record_id)
         elif record_id in remaining_tweets:
-            tweet_lookup[record_id] = _clean_text(record.get("text", ""))
+            tweet_lookup[record_id] = _extract_tweet_row(record)
             remaining_tweets.remove(record_id)
         if not remaining_users and not remaining_tweets:
             break
@@ -290,15 +299,22 @@ def _parse_nodes(
 
     tweet_rows = []
     for user_id, tweet_ids in sampled_posts.items():
-        texts = [tweet_lookup[tweet_id] for tweet_id in tweet_ids if tweet_lookup.get(tweet_id)]
-        tweet_rows.append(
-            {
-                "user_id": user_id,
-                "tweet_text": " ".join(texts).strip(),
-                "sampled_tweet_count": float(len(texts)),
-            }
-        )
-    tweet_df = pd.DataFrame(tweet_rows) if tweet_rows else pd.DataFrame(columns=["user_id", "tweet_text", "sampled_tweet_count"])
+        tweets = [tweet_lookup[tweet_id] for tweet_id in tweet_ids if tweet_lookup.get(tweet_id)]
+        texts = [str(tweet.get("text", "")) for tweet in tweets if str(tweet.get("text", "")).strip()]
+        tweet_row = {
+            "user_id": user_id,
+            "tweet_text": " ".join(texts).strip(),
+            "sampled_tweet_count": float(len(tweets)),
+        }
+        tweet_row.update(_aggregate_tweet_temporal_features(tweets))
+        tweet_row.update(_build_snapshot_feature_row(tweets, snapshot_count))
+        tweet_rows.append(tweet_row)
+    tweet_columns = (
+        ["user_id", "tweet_text", "sampled_tweet_count"]
+        + _time_proxy_columns()
+        + _temporal_snapshot_columns(snapshot_count)
+    )
+    tweet_df = pd.DataFrame(tweet_rows) if tweet_rows else pd.DataFrame(columns=tweet_columns)
     return profile_df, tweet_df
 
 
@@ -345,6 +361,132 @@ def _extract_profile_row(record: dict[str, Any], now: datetime) -> dict[str, Any
     }
 
 
+def _extract_tweet_row(record: dict[str, Any]) -> dict[str, Any]:
+    created_at = _parse_datetime(record.get("created_at"))
+    referenced_types = _extract_referenced_types(record.get("referenced_tweets"))
+    is_retweet = float("retweeted" in referenced_types)
+    is_reply = float("replied_to" in referenced_types)
+    is_quote = float("quoted" in referenced_types)
+    is_original = float(not referenced_types)
+
+    return {
+        "text": _clean_text(record.get("text", "")),
+        "timestamp": created_at.timestamp() if created_at else None,
+        "day_ordinal": created_at.date().toordinal() if created_at else None,
+        "hour": created_at.hour if created_at else None,
+        "weekday": created_at.weekday() if created_at else None,
+        "is_retweet": is_retweet,
+        "is_reply": is_reply,
+        "is_quote": is_quote,
+        "is_original": is_original,
+    }
+
+
+def _aggregate_tweet_temporal_features(tweets: list[dict[str, Any]]) -> dict[str, float]:
+    if not tweets:
+        return {column: 0.0 for column in _time_proxy_columns()}
+
+    timestamps = np.array(
+        sorted(float(tweet["timestamp"]) for tweet in tweets if tweet.get("timestamp") is not None),
+        dtype=np.float64,
+    )
+    hours = [int(tweet["hour"]) for tweet in tweets if tweet.get("hour") is not None]
+    weekdays = [int(tweet["weekday"]) for tweet in tweets if tweet.get("weekday") is not None]
+    day_ordinals = [int(tweet["day_ordinal"]) for tweet in tweets if tweet.get("day_ordinal") is not None]
+
+    gaps = np.diff(timestamps) / 3600.0 if len(timestamps) >= 2 else np.zeros(0, dtype=np.float64)
+    mean_gap = float(gaps.mean()) if len(gaps) else 0.0
+    std_gap = float(gaps.std(ddof=0)) if len(gaps) else 0.0
+    gap_cv = std_gap / (mean_gap + 1e-6) if len(gaps) else 0.0
+    burstiness = (std_gap - mean_gap) / (std_gap + mean_gap + 1e-6) if len(gaps) else 0.0
+
+    hour_hist = _discrete_histogram(hours, bucket_count=24)
+    weekday_hist = _discrete_histogram(weekdays, bucket_count=7)
+    gap_hist = _gap_histogram(gaps)
+
+    timestamped_count = float(len(timestamps))
+    observed_span_hours = (float(timestamps[-1] - timestamps[0]) / 3600.0) if len(timestamps) >= 2 else 0.0
+    unique_days = len(set(day_ordinals))
+    observed_days = max(observed_span_hours / 24.0, 0.0)
+    active_day_ratio = unique_days / max(observed_days + 1.0, 1.0)
+
+    retweet_hours = [int(tweet["hour"]) for tweet in tweets if tweet.get("is_retweet", 0.0) > 0.0 and tweet.get("hour") is not None]
+    original_hours = [int(tweet["hour"]) for tweet in tweets if tweet.get("is_original", 0.0) > 0.0 and tweet.get("hour") is not None]
+    retweet_hour_alignment = _hour_distribution_alignment(retweet_hours, original_hours)
+    retweet_night_gap = abs(_night_ratio(retweet_hours) - _night_ratio(original_hours))
+
+    total_tweets = max(float(len(tweets)), 1.0)
+    retweet_ratio = float(sum(float(tweet.get("is_retweet", 0.0)) for tweet in tweets) / total_tweets)
+    reply_ratio = float(sum(float(tweet.get("is_reply", 0.0)) for tweet in tweets) / total_tweets)
+    quote_ratio = float(sum(float(tweet.get("is_quote", 0.0)) for tweet in tweets) / total_tweets)
+    original_ratio = float(sum(float(tweet.get("is_original", 0.0)) for tweet in tweets) / total_tweets)
+
+    return {
+        "temporal_observed_span_hours": observed_span_hours,
+        "temporal_mean_gap_hours": mean_gap,
+        "temporal_std_gap_hours": std_gap,
+        "temporal_gap_cv": gap_cv,
+        "temporal_gap_entropy": _normalized_entropy(gap_hist),
+        "temporal_burstiness": burstiness,
+        "temporal_hour_entropy": _normalized_entropy(hour_hist),
+        "temporal_night_activity_ratio": _night_ratio(hours),
+        "temporal_weekend_ratio": _weekend_ratio(weekdays),
+        "temporal_peak_hour_share": float(hour_hist.max() / timestamped_count) if timestamped_count > 0.0 else 0.0,
+        "temporal_circadian_strength": _circular_strength(hours, period=24),
+        "temporal_weekly_strength": _circular_strength(weekdays, period=7),
+        "temporal_active_day_ratio": float(active_day_ratio),
+        "temporal_retweet_ratio": retweet_ratio,
+        "temporal_reply_ratio": reply_ratio,
+        "temporal_quote_ratio": quote_ratio,
+        "temporal_original_ratio": original_ratio,
+        "temporal_retweet_original_hour_alignment": retweet_hour_alignment,
+        "temporal_retweet_original_night_gap": float(retweet_night_gap),
+    }
+
+
+def _build_snapshot_feature_row(tweets: list[dict[str, Any]], snapshot_count: int) -> dict[str, float]:
+    columns = _temporal_snapshot_columns(snapshot_count)
+    if not tweets or snapshot_count <= 0:
+        return {column: 0.0 for column in columns}
+
+    timed_tweets = [tweet for tweet in tweets if tweet.get("timestamp") is not None]
+    if not timed_tweets:
+        return {column: 0.0 for column in columns}
+
+    ordered = sorted(timed_tweets, key=lambda item: float(item["timestamp"]))
+    start_time = float(ordered[0]["timestamp"])
+    end_time = float(ordered[-1]["timestamp"])
+    total_count = max(float(len(ordered)), 1.0)
+    span = max(end_time - start_time, 1.0)
+
+    bucket_tweets: list[list[dict[str, Any]]] = [[] for _ in range(snapshot_count)]
+    for tweet in ordered:
+        ratio = (float(tweet["timestamp"]) - start_time) / span
+        bucket_index = min(int(ratio * snapshot_count), snapshot_count - 1)
+        bucket_tweets[bucket_index].append(tweet)
+
+    features: dict[str, float] = {}
+    for snapshot_index, bucket in enumerate(bucket_tweets):
+        hours = [int(tweet["hour"]) for tweet in bucket if tweet.get("hour") is not None]
+        weekdays = [int(tweet["weekday"]) for tweet in bucket if tweet.get("weekday") is not None]
+        bucket_count = max(float(len(bucket)), 1.0)
+        values = {
+            "activity_share": float(len(bucket) / total_count),
+            "retweet_ratio": float(sum(float(tweet.get("is_retweet", 0.0)) for tweet in bucket) / bucket_count),
+            "reply_ratio": float(sum(float(tweet.get("is_reply", 0.0)) for tweet in bucket) / bucket_count),
+            "quote_ratio": float(sum(float(tweet.get("is_quote", 0.0)) for tweet in bucket) / bucket_count),
+            "night_ratio": _night_ratio(hours),
+            "weekend_ratio": _weekend_ratio(weekdays),
+            "hour_entropy": _normalized_entropy(_discrete_histogram(hours, bucket_count=24)),
+        }
+        for feature_name, value in values.items():
+            features[f"snapshot_{snapshot_index}_{feature_name}"] = float(value)
+
+    for column in columns:
+        features.setdefault(column, 0.0)
+    return features
+
+
 def _clean_text(value: Any) -> str:
     if value is None:
         return ""
@@ -374,6 +516,84 @@ def _parse_datetime(value: Any) -> datetime | None:
         return datetime.strptime(str(value).strip(), TWITTER_TIME_FORMAT).astimezone(timezone.utc)
     except ValueError:
         return None
+
+
+def _extract_referenced_types(value: Any) -> set[str]:
+    if not isinstance(value, list):
+        return set()
+    referenced_types: set[str] = set()
+    for item in value:
+        if isinstance(item, dict):
+            relation_type = _clean_text(item.get("type", "")).lower()
+            if relation_type:
+                referenced_types.add(relation_type)
+    return referenced_types
+
+
+def _discrete_histogram(values: list[int], bucket_count: int) -> np.ndarray:
+    histogram = np.zeros(bucket_count, dtype=np.float64)
+    for value in values:
+        if 0 <= int(value) < bucket_count:
+            histogram[int(value)] += 1.0
+    return histogram
+
+
+def _gap_histogram(gaps: np.ndarray) -> np.ndarray:
+    histogram = np.zeros(8, dtype=np.float64)
+    if gaps.size == 0:
+        return histogram
+    bins = np.array([0.0, 1.0, 3.0, 6.0, 12.0, 24.0, 72.0, 168.0], dtype=np.float64)
+    clipped = np.clip(gaps, a_min=0.0, a_max=None)
+    positions = np.digitize(clipped, bins=bins, right=False)
+    for position in positions:
+        histogram[min(int(position), len(histogram) - 1)] += 1.0
+    return histogram
+
+
+def _normalized_entropy(counts: np.ndarray) -> float:
+    total = float(np.sum(counts))
+    if total <= 0.0:
+        return 0.0
+    probabilities = counts / total
+    probabilities = probabilities[probabilities > 0.0]
+    if len(probabilities) <= 1:
+        return 0.0
+    entropy = -float(np.sum(probabilities * np.log(probabilities)))
+    return entropy / float(np.log(len(counts)))
+
+
+def _circular_strength(values: list[int], period: int) -> float:
+    if not values or period <= 0:
+        return 0.0
+    angles = (2.0 * np.pi * np.array(values, dtype=np.float64)) / float(period)
+    return float(np.abs(np.exp(1j * angles).mean()))
+
+
+def _night_ratio(hours: list[int]) -> float:
+    if not hours:
+        return 0.0
+    night_count = sum(1 for hour in hours if hour < 6 or hour >= 23)
+    return float(night_count / len(hours))
+
+
+def _weekend_ratio(weekdays: list[int]) -> float:
+    if not weekdays:
+        return 0.0
+    weekend_count = sum(1 for weekday in weekdays if weekday >= 5)
+    return float(weekend_count / len(weekdays))
+
+
+def _hour_distribution_alignment(left_hours: list[int], right_hours: list[int]) -> float:
+    if not left_hours or not right_hours:
+        return 0.0
+    left_hist = _discrete_histogram(left_hours, bucket_count=24)
+    right_hist = _discrete_histogram(right_hours, bucket_count=24)
+    left_norm = left_hist / max(float(left_hist.sum()), 1.0)
+    right_norm = right_hist / max(float(right_hist.sum()), 1.0)
+    denominator = float(np.linalg.norm(left_norm) * np.linalg.norm(right_norm))
+    if denominator <= 0.0:
+        return 0.0
+    return float(np.clip(np.dot(left_norm, right_norm) / denominator, 0.0, 1.0))
 
 
 def _feature_numeric_columns() -> list[str]:
@@ -417,6 +637,50 @@ def _graph_structural_columns() -> list[str]:
     ]
 
 
+def _time_proxy_columns() -> list[str]:
+    return [
+        "temporal_observed_span_hours",
+        "temporal_mean_gap_hours",
+        "temporal_std_gap_hours",
+        "temporal_gap_cv",
+        "temporal_gap_entropy",
+        "temporal_burstiness",
+        "temporal_hour_entropy",
+        "temporal_night_activity_ratio",
+        "temporal_weekend_ratio",
+        "temporal_peak_hour_share",
+        "temporal_circadian_strength",
+        "temporal_weekly_strength",
+        "temporal_active_day_ratio",
+        "temporal_retweet_ratio",
+        "temporal_reply_ratio",
+        "temporal_quote_ratio",
+        "temporal_original_ratio",
+        "temporal_retweet_original_hour_alignment",
+        "temporal_retweet_original_night_gap",
+    ]
+
+
+def _snapshot_feature_names() -> list[str]:
+    return [
+        "activity_share",
+        "retweet_ratio",
+        "reply_ratio",
+        "quote_ratio",
+        "night_ratio",
+        "weekend_ratio",
+        "hour_entropy",
+    ]
+
+
+def _temporal_snapshot_columns(snapshot_count: int) -> list[str]:
+    return [
+        f"snapshot_{snapshot_index}_{feature_name}"
+        for snapshot_index in range(max(int(snapshot_count), 0))
+        for feature_name in _snapshot_feature_names()
+    ]
+
+
 def _gnn_num_property_columns() -> list[str]:
     return [
         "followers_count",
@@ -431,6 +695,10 @@ def _gnn_cat_property_columns() -> list[str]:
     return ["is_protected", "is_verified", "default_profile_image"]
 
 
+def _gnn_time_columns() -> list[str]:
+    return _time_proxy_columns()
+
+
 def _is_manifest_compatible(manifest: dict[str, Any]) -> bool:
     required_keys = {
         "id_column",
@@ -442,8 +710,12 @@ def _is_manifest_compatible(manifest: dict[str, Any]) -> bool:
         "feature_numeric_columns",
         "feature_categorical_columns",
         "graph_structural_columns",
+        "time_proxy_columns",
+        "temporal_snapshot_columns",
+        "temporal_snapshot_count",
         "gnn_num_property_columns",
         "gnn_cat_property_columns",
+        "gnn_time_columns",
         "graph_relation_types",
     }
     return required_keys.issubset(set(manifest))
@@ -458,6 +730,9 @@ def _is_cached_frame_compatible(users: pd.DataFrame, graph_edges: pd.DataFrame) 
         "tweet_text",
         "combined_text",
         "default_profile_image",
+        "temporal_mean_gap_hours",
+        "temporal_hour_entropy",
+        "snapshot_0_activity_share",
     }
     required_edge_columns = {"source_id", "relation", "target_id"}
     return required_user_columns.issubset(set(users.columns)) and required_edge_columns.issubset(set(graph_edges.columns))

@@ -18,48 +18,62 @@ FAMILY_SOURCES: dict[str, tuple[str, ...]] = {
     "feature_only": ("feature",),
     "text_only": ("text",),
     "graph_only": ("graph",),
+    "time_only": ("time",),
     "feature_text": ("feature", "text"),
+    "feature_time": ("feature", "time"),
     "feature_graph": ("feature", "graph"),
     "feature_text_graph": ("feature", "text", "graph"),
+    "feature_text_graph_time": ("feature", "text", "graph", "time"),
 }
 
 SOURCE_LABELS_ZH = {
     "feature": "用户属性",
     "text": "文本语义",
     "graph": "图结构",
+    "time": "时间动态",
 }
 
 SOURCE_LABELS_EN = {
     "feature": "Profile",
     "text": "Text",
     "graph": "Graph",
+    "time": "Temporal",
 }
 
 FAMILY_LABELS_ZH = {
     "feature_only": "基于特征",
     "text_only": "基于文本",
     "graph_only": "基于图",
+    "time_only": "基于时间动态",
     "feature_text": "基于特征和文本",
+    "feature_time": "基于特征和时间",
     "feature_graph": "基于特征和图",
     "feature_text_graph": "基于特征、文本和图",
+    "feature_text_graph_time": "基于特征、文本、图和时间",
 }
 
 FAMILY_LABELS_EN = {
     "feature_only": "Feature only",
     "text_only": "Text only",
     "graph_only": "Graph only",
+    "time_only": "Temporal only",
     "feature_text": "Feature + Text",
+    "feature_time": "Feature + Temporal",
     "feature_graph": "Feature + Graph",
     "feature_text_graph": "Feature + Text + Graph",
+    "feature_text_graph_time": "Feature + Text + Graph + Temporal",
 }
 
 SOURCE_GAIN_COMPARISONS: tuple[tuple[str, str, str], ...] = (
     ("feature_only", "feature_text", "text"),
     ("feature_only", "feature_graph", "graph"),
+    ("feature_only", "feature_time", "time"),
     ("text_only", "feature_text", "feature"),
     ("graph_only", "feature_graph", "feature"),
+    ("time_only", "feature_time", "feature"),
     ("feature_text", "feature_text_graph", "graph"),
     ("feature_graph", "feature_text_graph", "text"),
+    ("feature_text_graph", "feature_text_graph_time", "time"),
 )
 
 SOURCE_ABLATION_COLUMNS = [
@@ -357,7 +371,7 @@ def compute_best_model_source_ablation(config: ProjectConfig, metrics: pd.DataFr
         y_true = split_df["label_id"].to_numpy(dtype=int)
         baseline_metrics = _compute_metrics(y_true, baseline_pred, baseline_prob)
 
-        for source in ("feature", "text", "graph"):
+        for source in ("feature", "text", "graph", "time"):
             ablated_matrix = _build_ablated_matrix(
                 numeric_matrix=numeric_matrix,
                 text_matrix=text_matrix,
@@ -574,7 +588,8 @@ def _load_transformer_embeddings(config: ProjectConfig) -> pd.DataFrame | None:
 def _resolve_numeric_source_positions(artifact: dict[str, Any], manifest: dict[str, Any]) -> dict[str, list[int]]:
     feature_columns = set(manifest.get("feature_numeric_columns", [])) | set(manifest.get("feature_categorical_columns", []))
     graph_columns = set(manifest.get("graph_structural_columns", []))
-    numeric_positions = {"feature": [], "text": [], "graph": []}
+    time_columns = set(manifest.get("time_proxy_columns", []))
+    numeric_positions = {"feature": [], "text": [], "graph": [], "time": []}
 
     for index, column in enumerate(artifact.get("numeric_columns", [])):
         column = str(column)
@@ -582,6 +597,8 @@ def _resolve_numeric_source_positions(artifact: dict[str, Any], manifest: dict[s
             numeric_positions["feature"].append(index)
         elif column in graph_columns or column.startswith("n2v_"):
             numeric_positions["graph"].append(index)
+        elif column in time_columns:
+            numeric_positions["time"].append(index)
         elif column.startswith("combined_text_emb_"):
             numeric_positions["text"].append(index)
 

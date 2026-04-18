@@ -1,295 +1,222 @@
-# 方法文档
+# 模态可靠性感知动态融合方法
 
-## 1. 方法设计不再只围绕“谁分数最高”
+## 1. 方法定位
 
-本项目现在用统一框架回答三个研究问题：
+这个分支不再比较多种方法，而是只保留一套新的方法：
 
-1. 哪类信息更有效？
-2. 不同方法差异在哪里？
-3. 结果是否可解释？
+`Modality Reliability-Aware Dynamic Fusion`
 
-因此，方法文档的组织顺序也对应调整为：
+中文可以表述为：
 
-- 数据如何被整理成统一输入；
-- 六类方法如何映射到研究问题；
-- 解释性分析如何和实验结果接起来；
-- 哪些代码模块分别负责训练、解释和可视化。
+“提出一种面向社交机器人检测的模态可靠性感知动态融合方法，根据用户文本完整度、图结构稀疏度和属性异常程度，动态分配 feature / text / graph 三个分支的贡献权重。”
 
-## 2. 数据组织与输入表示
+它的核心不是“再堆一个更大的模型”，而是解决一个更具体也更可解释的问题：
 
-### 2.1 原始输入文件
+- 同样是账号 A 和账号 B，为什么不能用完全相同的模态融合方式？
+- 为什么有的账号应该更相信文本，有的账号应该更相信图结构？
+- 为什么固定拼接会把强信号和弱信号混在一起，削弱最终判别能力？
 
-项目直接使用 `TwiBot-20` 原始文件：
+这个方法的答案是：
 
-- `data/label.csv`
-- `data/split.csv`
-- `data/edge.csv`
-- `data/node.json`
+不是对所有样本采用同一套融合权重，而是让模型先判断“当前这个账号哪一种模态更可靠”，再进行融合。
 
-### 2.2 为什么使用流式解析
+## 2. 整体思路
 
-`node.json` 体积很大，因此代码不会一次性全部读入内存，而是流式解析 JSON 数组。
+方法分成三层：
 
-对应实现：
+### 2.1 三个基础分支
 
-- `code/data.py`
+1. `Feature branch`
+   读取账号的结构化属性，例如粉丝数、关注数、账号年龄、简介长度、默认头像、认证状态等。
 
-### 2.3 用户级样本包含什么
+2. `Text branch`
+   读取账号简介和采样 tweet 的语义表示。
 
-数据准备结束后，用户级样本会统一整理为：
+3. `Graph branch`
+   在 `follow` 和 `friend` 两类关系图上做关系感知传播，建模节点在社交网络中的上下文位置。
 
-- `user_id`
-- `split`：`train / val / test / support`
-- `label_id`：`机器人 / 人类`
-- `description_text`
-- `tweet_text`
-- `combined_text`
-- 用户属性特征
-- 图结构统计特征
+### 2.2 可靠性评估层
 
-### 2.4 为什么保留 support 节点
+模型不会直接把三个分支拼起来，而是先读取一组“模态质量指标”：
 
-`support` 节点没有分类标签，但它们仍然是图的一部分。对于 `GCN`、`GAT`、`BotRGCN` 这类图神经网络，support 节点能提供邻居上下文，因此不能简单删除。
+- 文本是否丰富：`quality_text_richness`
+- 文本是否完整：`quality_text_completeness`
+- 图连接是否充分：`quality_graph_connectivity`
+- 关系模式是否稳定：`quality_graph_reciprocity`
+- 账号属性是否完整：`quality_feature_completeness`
+- 账号属性是否异常：`quality_profile_anomaly`
+- 账号是否足够成熟：`quality_account_maturity`
 
-## 3. 六类方法如何映射到三个问题
+这些指标不直接用于最终分类，而是作为“门控依据”，告诉模型：
 
-### 3.1 问题一：哪类信息更有效？
+- 这条样本的文本值不值得信；
+- 这条样本的图结构值不值得信；
+- 这条样本的属性信号是不是特别强。
 
-这一步首先看单源方法：
+### 2.3 动态融合层
 
-- F：只看用户属性
-- T：只看文本语义
-- G：只看图结构
+基于上面的质量指标，模型通过一个 gating network 输出三路权重：
 
-然后再看双源和三源方法：
+`w_feature, w_text, w_graph`
 
-- FT：属性 + 文本
-- FG：属性 + 图
-- FTG：属性 + 文本 + 图
+并满足：
 
-因此，“哪类信息更有效”不是只比较一个模型，而是比较六类方法族之间的表现，以及加入某类信息后平均会带来多少增益。
+`softmax([w_feature, w_text, w_graph])`
 
-### 3.2 问题二：不同方法差异在哪里？
+也就是说，每个账号都会有自己的一组融合权重。
 
-这里主要看两层差异：
+然后模型先做一轮加权融合，再接一层轻量 attention fusion，让三路表示还能彼此交互，而不是只做机械加权。
 
-#### 第一层：信息差异
+## 3. 为什么这是一种创新
 
-例如：
+传统多模态融合最常见的问题，是对所有样本都采用同一种融合规则：
 
-- 从 `text_only` 到 `feature_text`，是在“只用文本”基础上增加了用户属性；
-- 从 `feature_text` 到 `feature_text_graph`，是在“属性 + 文本”基础上增加了图结构。
+- 直接拼接；
+- 固定加权；
+- 统一 attention；
+- 统一图传播后输出。
 
-这层差异由：
+但在社交机器人检测里，不同账号的信息质量本身就不一样：
 
-- `source_contribution_details.csv`
+- 有些账号 tweet 很多、简介也很长，文本分支更可靠；
+- 有些账号文本很少，但网络关系很清晰，图分支更可靠；
+- 有些账号属性极不自然，例如粉丝关注比异常、发文频率异常，这时 feature 分支更可靠。
 
-来描述。
+因此，这个方法的创新点不是“多了一个模态”，而是：
 
-#### 第二层：融合机制差异
+`把固定融合，改成样本级自适应融合。`
 
-即使都使用特征、文本、图三类信息，不同方法仍然会不同：
+## 4. 代码结构
 
-- `feature_text_graph_tfidf_node2vec_logistic_regression`
-- `feature_text_graph_gcn`
-- `feature_text_graph_gat`
-- `feature_text_graph_botrgcn`
+核心实现集中在以下文件：
 
-这里的差异来自：
+- `code/graph_models.py`
+  只保留这一套动态融合模型。
 
-- 简单拼接 vs 图传播
-- 普通图卷积 vs 注意力传播
-- 同质传播 vs 关系感知传播
-
-### 3.3 问题三：结果是否可解释？
-
-这一步不只看分数，而是做两类解释：
-
-#### 信息源层面的解释
-
-- 平均增益：加入某类信息后平均提升多少；
-- 消融实验：在最佳可解释融合基线中，移除某类信息后损失多少。
-
-#### 信号层面的解释
-
-- 用户属性：模型主要在看哪些账号画像异常；
-- 文本语义：模型主要抓哪些词或短语；
-- 图结构：模型主要抓哪些关系模式。
-
-## 4. 六类方法本身的角色
-
-## 4.1 基于特征（F）
-
-### `feature_only_logistic_regression`
-
-- 只使用用户属性特征；
-- 适合作为最直接、最可解释的基线；
-- 有助于回答“单看账号画像是否足够识别机器人”。
-
-### `feature_only_random_forest`
-
-- 仍然只使用用户属性；
-- 允许非线性关系；
-- 可直接输出特征重要性，适合做解释性图表。
-
-## 4.2 基于文本（T）
-
-### `text_only_tfidf_logistic_regression`
-
-- 把简介和 tweet 合并为文本；
-- 使用 TF-IDF；
-- 适合抓关键词和短语层面的可解释信号。
-
-### `text_only_transformer_logistic_regression`
-
-- 使用 SentenceTransformer 生成稠密文本表示；
-- 更偏语义相似性；
-- 适合与 TF-IDF 对照，观察“关键词”和“语义嵌入”谁更有效。
-
-## 4.3 基于图（G）
-
-### `graph_only_structure_random_forest`
-
-- 只使用结构统计特征；
-- 用来回答“网络连接形态本身是否足够区分机器人和人类”。
-
-### `graph_only_node2vec_logistic_regression`
-
-- 用 `Node2Vec` 学习节点在图中的结构角色；
-- 比单纯度数统计更强调整体拓扑位置。
-
-## 4.4 基于特征和文本（FT）
-
-### `feature_text_tfidf_logistic_regression`
-
-- 将用户属性与 TF-IDF 拼接；
-- 是最直接的“结构化特征 + 文本关键词”融合基线。
-
-### `feature_text_transformer_logistic_regression`
-
-- 将用户属性与 Transformer 文本嵌入拼接；
-- 检查“文本语义与结构化属性是否互补”。
-
-## 4.5 基于特征和图（FG）
-
-### `feature_graph_random_forest`
-
-- 将用户属性与图统计特征一起输入；
-- 适合观察“加图统计后是否稳定提升”。
-
-### `feature_graph_node2vec_logistic_regression`
-
-- 将用户属性、图统计和图嵌入一起输入；
-- 用于观察“账号画像 + 网络位置”是否互补。
-
-## 4.6 基于特征、文本和图（FTG）
-
-### `feature_text_graph_tfidf_node2vec_logistic_regression`
-
-- 把属性、TF-IDF 文本、Node2Vec 一起拼接；
-- 是非 GNN 的可解释融合基线；
-- 适合做消融分析。
-
-### `feature_text_graph_gcn`
-
-- 输入 description、tweet、数值属性、类别属性和边；
-- 用 `GCNConv` 在图上传播；
-- 对应最基础的图神经融合方式。
-
-### `feature_text_graph_gat`
-
-- 输入结构与 GCN 相同；
-- 用 `GATConv` 对不同邻居分配不同权重；
-- 适合观察注意力传播是否优于普通卷积。
-
-### `feature_text_graph_botrgcn`
-
-- 输入结构与 GCN/GAT 相同；
-- 用 `RGCNConv` 区分 `follow` 与 `friend` 等关系类型；
-- 适合回答“图结构是否只有在关系感知传播里才真正发挥作用”。
-
-## 5. 解释性分析模块现在负责什么
-
-对应实现：
-
-- `code/interpretation.py`
-
-它现在负责三类输出：
-
-### 5.1 信息源平均增益
-
-输出：
-
-- `artifacts/tables/source_contribution_summary.csv`
-- `artifacts/tables/source_contribution_details.csv`
-
-作用：
-
-- 说明加入用户属性、文本语义、图结构后，平均会带来多大提升；
-- 说明哪些方法差异来自“增加了什么信息”。
-
-### 5.2 融合模型消融
-
-输出：
-
-- `artifacts/tables/source_ablation.csv`
-
-作用：
-
-- 说明在最佳可解释融合基线中，哪类信息是核心输入，哪类信息只是边际补充。
-
-### 5.3 解释性信号表
-
-输出：
-
-- `artifacts/tables/feature_signals.csv`
-- `artifacts/tables/text_signals.csv`
-- `artifacts/tables/graph_signals.csv`
-
-作用：
-
-- 用户属性：哪些账号特征更像机器人，哪些更像人类；
-- 文本：哪些关键词/短语更像机器人，哪些更像人类；
-- 图结构：哪些结构统计模式更像机器人，哪些更像人类。
-
-## 6. 可视化模块现在回答什么
-
-对应实现：
+- `code/experiments.py`
+  只负责准备文本稠密表示，并训练这一套方法。
 
 - `code/visualization.py`
-
-现在新增并重点维护三张问题导向图：
-
-- `artifacts/figures/information_effectiveness.png`
-  回答“哪类信息更有效”。
-
-- `artifacts/figures/method_differences.png`
-  回答“不同方法差异在哪里”。
-
-- `artifacts/figures/explainability_signals.png`
-  回答“结果是否可解释”。
-
-- `artifacts/figures/feature_signal_map.png`
-  把“重要特征”与“机器人 / 人类方向差异”放在一张图里。
-
-- `artifacts/figures/embedding_separation_map.png`
-  展示文本语义嵌入和图嵌入在二维空间里的类分布与重叠程度。
-
-- `artifacts/figures/local_network_patterns.png`
-  展示高置信机器人 / 人类的局部网络子图和关注 / 好友关系模式。
-
-当前保留的核心图主要就是上面这几张，目的是让汇报时始终围绕“整体表现 -> 信息贡献 -> 可解释性”这一条主线展开，而不是再回到零散的中间分析图。
-
-## 7. 报告模块现在怎么组织
-
-对应实现：
+  只画与该方法有关的图：性能图、分支权重图、可靠性画像图。
 
 - `code/reporting.py`
+  只生成这套方法的报告，不再做多方法比较。
 
-生成的 `artifacts/report.md` 现在不再按“先贴一堆排行榜，再做零散解释”的方式组织，而是直接按三个问题展开：
+## 5. 核心模块解释
 
-1. 哪类信息更有效？
-2. 不同方法差异在哪里？
-3. 结果是否可解释？
+## 5.1 Local modality encoders
 
-这样 `README`、方法文档、可视化、自动报告会保持同一条逻辑主线，而不是各写各的。
+在 `code/graph_models.py` 中，模型先分别编码三类信息：
+
+- `description_encoder`
+- `tweet_encoder`
+- `numeric_encoder`
+- `categorical_encoder`
+
+随后构成两个局部表示：
+
+- `text_repr = f(description, tweet)`
+- `feature_repr = f(numeric, categorical)`
+
+其中：
+
+- `text_repr` 表示当前账号本地可见的语义信息；
+- `feature_repr` 表示当前账号本地可见的结构化画像信息。
+
+## 5.2 Graph branch
+
+图分支不是直接使用原始图特征，而是先构造：
+
+`graph_seed = f(feature_repr, text_repr)`
+
+然后在关系图上执行两层 `RGCNConv`：
+
+- `follow`
+- `friend`
+
+这样得到的 `graph_repr` 不只是“这个账号自己是什么样”，而是“这个账号在社交图里处在什么关系上下文中”。
+
+## 5.3 Quality-aware gate
+
+`ReliabilityAwareFusion` 模块是这套方法的关键。
+
+它包含两部分：
+
+1. `learned gate`
+   通过一个小型 MLP 从质量指标中学习 gate logits。
+
+2. `quality prior`
+   把方法设计者的先验注入 gate：
+   - 文本丰富时，给 text 一个正偏置；
+   - 图连接强时，给 graph 一个正偏置；
+   - 属性异常明显时，给 feature 一个正偏置。
+
+最终 gate logits 为：
+
+`gate_logits = learned_gate(quality) + prior_scale * quality_prior(quality)`
+
+再通过 `softmax` 变成权重。
+
+这样做的好处是：
+
+- 纯学习式 gate 更灵活；
+- 先验偏置让模型更容易朝着我们想表达的“可靠性逻辑”收敛；
+- 最后输出的权重更容易解释。
+
+## 5.4 Lightweight attention fusion
+
+在得到三路权重以后，模型不是停在简单加权求和，而是继续做一层轻量 attention：
+
+- 先做 weighted sum，得到一个“主融合表示”；
+- 再把这个表示作为 query，对三路模态表示做一次 attention；
+- 最终输出 residual + layer norm 后的融合向量。
+
+这一步的作用是：
+
+- 保留 gate 的样本级权重解释性；
+- 同时避免“完全独立加权”带来的信息割裂。
+
+## 6. 训练目标
+
+训练时使用：
+
+- 类别不平衡感知的交叉熵损失；
+- `AdamW` 优化器；
+- 基于验证集 F1 的 early stopping。
+
+因此，这个方法并不是只追求一个 logit 输出，而是围绕机器人检测这个不平衡分类任务来设计训练过程。
+
+## 7. 模型输出
+
+训练完成后会输出：
+
+- `artifacts/models/modality_reliability_adaptive_fusion.pt`
+  最终模型参数。
+
+- `artifacts/tables/experiment_metrics.csv`
+  验证集和测试集的指标。
+
+- `artifacts/tables/modality_reliability_adaptive_fusion_gate_diagnostics.csv`
+  每个账号的：
+  - 预测结果；
+  - 三路权重；
+  - 主导模态；
+  - 模态质量指标。
+
+这个表非常重要，因为它可以直接支撑你的方法解释：
+
+- 哪些样本更依赖文本？
+- 哪些样本更依赖图？
+- 哪些样本更依赖属性？
+
+## 8. 适合论文或答辩的表述
+
+可以直接这样写：
+
+“为解决社交机器人检测中不同模态信息质量不一致的问题，本文提出一种模态可靠性感知动态融合方法。该方法首先分别学习用户属性表示、文本语义表示与关系图表示；随后基于文本完整度、图结构连通性和属性异常程度等质量指标，通过门控网络为不同样本动态分配模态权重，并结合轻量注意力机制完成最终融合。相比固定拼接式融合，该方法能够根据账号条件自动选择更可信的信息来源，从而提升模型的适应性与可解释性。”
+
+## 9. 一句话总结
+
+这套方法最重要的思想可以浓缩成一句话：
+
+`不是所有账号都应该用同一种融合方式，而是先判断哪种模态更可靠，再做融合。`
