@@ -1,0 +1,58 @@
+project:
+  name: dynamic_adaptive_fusion_bot_detector
+  seed: 42
+  device: cpu
+
+paths:
+  data_root: ../data/raw
+  processed_dir: ../data/processed
+  snapshot_dir: ../data/processed/dynamic_graph/snapshots
+  output_dir: ../outputs
+  checkpoint_dir: ../outputs/checkpoints
+  log_dir: ../outputs/logs
+  figure_dir: ../outputs/figures
+  table_dir: ../outputs/tables
+
+preprocess:
+  max_tweets_per_user: 20
+  tweet_separator: " [SEP] "
+  empty_token: "[EMPTY]"
+  fallback_created_at: "2006-03-01T00:00:00+00:00"
+
+text:
+  encoder_type: sentence_transformer
+  fallback_encoder_type: tfidf_svd
+  model_name: all-MiniLM-L6-v2
+  batch_size: 64
+  max_features: 20000
+  svd_dim: 256
+  min_df: 2
+
+graph:
+  granularity: monthly
+  max_snapshots: 12
+  snapshot_sampling: uniform
+  relation_map:
+    follow: 0
+    friend: 1
+
+model:
+  d_model: 128
+  dropout: 0.3
+  graph_hidden_dim: 128
+  text_hidden_dim: 256
+  attr_hidden_dim: 128
+  temporal_heads: 1
+  fusion_hidden_dim: 128
+
+training:
+  epochs: 50
+  learning_rate: 0.001
+  weight_decay: 0.0001
+  patience: 8
+  lambda_modal: 0.0
+  lambda_temporal: 0.0
+
+evaluation:
+  decision_threshold: 0.5
+  top_temporal_cases: 32
