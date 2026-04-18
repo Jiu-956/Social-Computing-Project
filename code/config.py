@@ -38,6 +38,12 @@ class ProjectConfig:
     gnn_learning_rate: float = 1e-2
     gnn_weight_decay: float = 5e-2
     gnn_dropout: float = 0.1
+    run_dynamic_fusion: bool = True
+    adaptive_gate_hidden_dim: int = 96
+    adaptive_fusion_temperature: float = 1.0
+    temporal_snapshot_count: int = 4
+    temporal_transformer_heads: int = 4
+    temporal_transformer_layers: int = 2
 
     visualization_sample_size: int = 3000
     random_state: int = 42
