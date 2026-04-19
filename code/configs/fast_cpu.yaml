@@ -1,0 +1,21 @@
+project:
+  device: cpu
+
+preprocess:
+  max_tweets_per_user: 5
+
+text:
+  encoder_type: tfidf_svd
+  fallback_encoder_type: tfidf_svd
+  max_features: 10000
+  svd_dim: 128
+  min_df: 2
+
+graph:
+  max_snapshots: 6
+
+training:
+  epochs: 20
+  patience: 5
+  log_every: 1
+  save_every: 1

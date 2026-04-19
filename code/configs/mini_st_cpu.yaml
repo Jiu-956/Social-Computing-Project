@@ -1,0 +1,20 @@
+project:
+  device: cpu
+
+preprocess:
+  max_tweets_per_user: 5
+
+text:
+  encoder_type: sentence_transformer
+  fallback_encoder_type: tfidf_svd
+  model_name: paraphrase-MiniLM-L3-v2
+  batch_size: 128
+
+graph:
+  max_snapshots: 6
+
+training:
+  epochs: 20
+  patience: 5
+  log_every: 1
+  save_every: 1

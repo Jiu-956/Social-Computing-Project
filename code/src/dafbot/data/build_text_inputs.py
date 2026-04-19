@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import hashlib
+import json
 import pickle
 from pathlib import Path
 
@@ -57,6 +59,25 @@ def _encode_with_tfidf_svd(texts: list[str], config: dict[str, object]) -> np.nd
     return dense
 
 
+def _build_text_signature(user_ids: list[str], texts: list[str], preprocess_cfg: dict[str, object], text_cfg: dict[str, object]) -> str:
+    settings = {
+        "empty_token": preprocess_cfg["empty_token"],
+        "tweet_separator": preprocess_cfg["tweet_separator"],
+        "encoder_type": text_cfg["encoder_type"],
+        "model_name": text_cfg.get("model_name"),
+        "max_features": text_cfg.get("max_features"),
+        "svd_dim": text_cfg.get("svd_dim"),
+        "min_df": text_cfg.get("min_df"),
+    }
+    hasher = hashlib.sha256(json.dumps(settings, sort_keys=True).encode("utf-8"))
+    for user_id, text in zip(user_ids, texts):
+        hasher.update(user_id.encode("utf-8", errors="ignore"))
+        hasher.update(b"\0")
+        hasher.update(text.encode("utf-8", errors="ignore"))
+        hasher.update(b"\1")
+    return hasher.hexdigest()
+
+
 def build_text_inputs_and_features(config: dict[str, object], user_table: pd.DataFrame) -> torch.Tensor:
     processed_dir = Path(config["paths"]["processed_dir"])
     preprocess_cfg = config["preprocess"]
@@ -71,11 +92,28 @@ def build_text_inputs_and_features(config: dict[str, object], user_table: pd.Dat
         )
         for row in user_table.itertuples(index=False)
     ]
-    text_payload = [{"user_id": user_id, "text": text} for user_id, text in zip(user_table["user_id"], texts)]
+    user_ids = [str(user_id) for user_id in user_table["user_id"].tolist()]
+    text_payload = [{"user_id": user_id, "text": text} for user_id, text in zip(user_ids, texts)]
     with (processed_dir / "text_inputs.pkl").open("wb") as handle:
         pickle.dump(text_payload, handle)
 
     encoder_name = text_cfg["encoder_type"]
+    signature = _build_text_signature(user_ids, texts, preprocess_cfg, text_cfg)
+    tensor_path = processed_dir / "text_features.pt"
+    meta_path = processed_dir / "text_feature_meta.json"
+    if tensor_path.exists() and meta_path.exists():
+        try:
+            cached_meta = json.loads(meta_path.read_text(encoding="utf-8"))
+        except json.JSONDecodeError:
+            cached_meta = None
+        if (
+            cached_meta
+            and cached_meta.get("signature") == signature
+            and cached_meta.get("encoder") == encoder_name
+        ):
+            print(f"Reusing cached text features from {tensor_path}.")
+            return torch.load(tensor_path, map_location="cpu")
+
     fallback_name = text_cfg["fallback_encoder_type"]
     active_encoder = encoder_name
     try:
@@ -95,14 +133,15 @@ def build_text_inputs_and_features(config: dict[str, object], user_table: pd.Dat
             raise ValueError(f"Unsupported fallback text encoder: {fallback_name}")
 
     text_tensor = torch.tensor(text_features, dtype=torch.float32)
-    torch.save(text_tensor, processed_dir / "text_features.pt")
+    torch.save(text_tensor, tensor_path)
     dump_json(
         {
             "encoder": active_encoder,
             "requested_encoder": encoder_name,
             "feature_dim": int(text_tensor.shape[1]),
             "text_count": len(texts),
+            "signature": signature,
         },
-        processed_dir / "text_feature_meta.json",
+        meta_path,
     )
     return text_tensor

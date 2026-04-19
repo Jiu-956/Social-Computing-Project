@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import time
 from copy import deepcopy
 from dataclasses import dataclass
 from pathlib import Path
@@ -54,6 +55,124 @@ def _build_model(config: dict[str, Any], dataset, variant_name: str) -> DynamicA
     )
 
 
+def _format_duration(seconds: float) -> str:
+    total_seconds = max(0, int(round(seconds)))
+    hours, remainder = divmod(total_seconds, 3600)
+    minutes, secs = divmod(remainder, 60)
+    if hours:
+        return f"{hours:d}:{minutes:02d}:{secs:02d}"
+    return f"{minutes:02d}:{secs:02d}"
+
+
+def _build_checkpoint_payload(
+    variant_name: str,
+    state_dict: dict[str, torch.Tensor],
+    history: list[dict[str, Any]],
+    selected_snapshot_dates: list[str],
+    metrics: list[dict[str, Any]] | None = None,
+    *,
+    epoch: int | None = None,
+    best_val_f1: float | None = None,
+    is_partial: bool = False,
+) -> dict[str, Any]:
+    payload = {
+        "variant_name": variant_name,
+        "variant": deepcopy(EXPERIMENT_VARIANTS[variant_name]),
+        "state_dict": state_dict,
+        "history": history,
+        "selected_snapshot_dates": selected_snapshot_dates,
+        "is_partial": is_partial,
+    }
+    if metrics is not None:
+        payload["metrics"] = metrics
+    if epoch is not None:
+        payload["epoch"] = epoch
+    if best_val_f1 is not None:
+        payload["best_val_f1"] = float(best_val_f1)
+    return payload
+
+
+def _write_partial_training_state(
+    checkpoint_dir: Path,
+    log_dir: Path,
+    variant_name: str,
+    state_dict: dict[str, torch.Tensor],
+    history: list[dict[str, Any]],
+    selected_snapshot_dates: list[str],
+    *,
+    epoch: int,
+    best_val_f1: float,
+    write_best: bool,
+) -> None:
+    latest_checkpoint_path = checkpoint_dir / f"{variant_name}.latest.pt"
+    torch.save(
+        _build_checkpoint_payload(
+            variant_name=variant_name,
+            state_dict=state_dict,
+            history=history,
+            selected_snapshot_dates=selected_snapshot_dates,
+            epoch=epoch,
+            best_val_f1=best_val_f1,
+            is_partial=True,
+        ),
+        latest_checkpoint_path,
+    )
+    dump_json(history, log_dir / f"{variant_name}_history.json")
+    if write_best:
+        best_checkpoint_path = checkpoint_dir / f"{variant_name}.pt"
+        torch.save(
+            _build_checkpoint_payload(
+                variant_name=variant_name,
+                state_dict=state_dict,
+                history=history,
+                selected_snapshot_dates=selected_snapshot_dates,
+                epoch=epoch,
+                best_val_f1=best_val_f1,
+                is_partial=True,
+            ),
+            best_checkpoint_path,
+        )
+
+
+def _print_epoch_start(epoch: int, total_epochs: int) -> None:
+    print(f"Epoch {epoch:03d}/{total_epochs:03d} started...", flush=True)
+
+
+def _print_epoch_stage(epoch: int, total_epochs: int, stage: str) -> None:
+    print(f"Epoch {epoch:03d}/{total_epochs:03d} | {stage}", flush=True)
+
+
+def _print_training_progress(
+    epoch: int,
+    total_epochs: int,
+    loss: float,
+    val_metrics: dict[str, float],
+    best_val_f1: float,
+    patience_left: int,
+    improved: bool,
+    epoch_seconds: float,
+    elapsed_seconds: float,
+) -> None:
+    status = "improved" if improved else "no_improve"
+    print(
+        " | ".join(
+            [
+                f"Epoch {epoch:03d}/{total_epochs:03d}",
+                f"loss={loss:.4f}",
+                f"val_f1={val_metrics['f1']:.4f}",
+                f"val_acc={val_metrics['accuracy']:.4f}",
+                f"val_auc={val_metrics['auc_roc']:.4f}",
+                f"best_f1={best_val_f1:.4f}",
+                f"patience_left={patience_left}",
+                f"epoch_time={_format_duration(epoch_seconds)}",
+                f"elapsed={_format_duration(elapsed_seconds)}",
+                status,
+            ]
+        ),
+        flush=True,
+    )
+
+
 def train_experiment(config: dict[str, Any], dataset, variant_name: str) -> TrainArtifacts:
     set_seed(int(config["project"]["seed"]))
     device = torch.device(config["project"]["device"])
@@ -75,12 +194,43 @@ def train_experiment(config: dict[str, Any], dataset, variant_name: str) -> Trai
 
     best_val_f1 = -1.0
     best_state = None
-    patience_left = int(config["training"]["patience"])
+    total_epochs = int(config["training"]["epochs"])
+    total_patience = int(config["training"]["patience"])
+    log_every = max(1, int(config["training"].get("log_every", 1)))
+    save_every = max(1, int(config["training"].get("save_every", 1)))
+    patience_left = total_patience
     history: list[dict[str, Any]] = []
+    checkpoint_dir = Path(config["paths"]["checkpoint_dir"])
+    log_dir = Path(config["paths"]["log_dir"])
+    selected_snapshot_dates = dataset.meta["selected_snapshot_dates"]
+    training_start = time.perf_counter()
 
-    for epoch in range(1, int(config["training"]["epochs"]) + 1):
+    print(
+        " | ".join(
+            [
+                f"Training {variant_name}",
+                f"device={device}",
+                f"epochs={total_epochs}",
+                f"patience={total_patience}",
+                f"log_every={log_every}",
+                f"save_every={save_every}",
+                f"train={int(train_idx.numel())}",
+                f"val={int(val_idx.numel())}",
+                f"test={int(test_idx.numel())}",
+                f"snapshots={len(snapshots)}",
+            ]
+        ),
+        flush=True,
+    )
+
+    for epoch in range(1, total_epochs + 1):
+        epoch_start = time.perf_counter()
+        if epoch == 1 or epoch % log_every == 0:
+            _print_epoch_start(epoch, total_epochs)
         model.train()
         optimizer.zero_grad()
+        if epoch == 1:
+            _print_epoch_stage(epoch, total_epochs, "train_forward")
         logits, aux = model(attr_features, text_features, snapshots, quality_features)
         loss, loss_terms = build_total_loss(
             logits=logits,
@@ -90,23 +240,61 @@ def train_experiment(config: dict[str, Any], dataset, variant_name: str) -> Trai
             lambda_modal=float(config["training"]["lambda_modal"]),
             lambda_temporal=float(config["training"]["lambda_temporal"]),
         )
+        if epoch == 1:
+            _print_epoch_stage(epoch, total_epochs, "backward")
         loss.backward()
         optimizer.step()
 
         model.eval()
         with torch.no_grad():
+            if epoch == 1:
+                _print_epoch_stage(epoch, total_epochs, "val_forward")
             val_logits, _ = model(attr_features, text_features, snapshots, quality_features)
             val_metrics = compute_classification_metrics(val_logits, labels, val_idx, threshold=float(config["evaluation"]["decision_threshold"]))
 
         history.append({"epoch": epoch, **loss_terms, **{f"val_{key}": value for key, value in val_metrics.items()}})
-        if val_metrics["f1"] > best_val_f1:
+        improved = val_metrics["f1"] > best_val_f1
+        if improved:
             best_val_f1 = val_metrics["f1"]
             best_state = {key: value.detach().cpu().clone() for key, value in model.state_dict().items()}
-            patience_left = int(config["training"]["patience"])
+            patience_left = total_patience
         else:
             patience_left -= 1
-            if patience_left <= 0:
-                break
+
+        should_save = improved or epoch == 1 or epoch == total_epochs or epoch % save_every == 0 or patience_left <= 1
+        if should_save:
+            latest_state = {key: value.detach().cpu().clone() for key, value in model.state_dict().items()}
+            state_to_save = best_state if improved and best_state is not None else latest_state
+            _write_partial_training_state(
+                checkpoint_dir=checkpoint_dir,
+                log_dir=log_dir,
+                variant_name=variant_name,
+                state_dict=state_to_save,
+                history=history,
+                selected_snapshot_dates=selected_snapshot_dates,
+                epoch=epoch,
+                best_val_f1=best_val_f1,
+                write_best=improved,
+            )
+
+        epoch_seconds = time.perf_counter() - epoch_start
+        elapsed_seconds = time.perf_counter() - training_start
+        should_log = improved or epoch == 1 or epoch == total_epochs or epoch % log_every == 0 or patience_left <= 1
+        if should_log:
+            _print_training_progress(
+                epoch=epoch,
+                total_epochs=total_epochs,
+                loss=float(loss.item()),
+                val_metrics=val_metrics,
+                best_val_f1=best_val_f1,
+                patience_left=patience_left,
+                improved=improved,
+                epoch_seconds=epoch_seconds,
+                elapsed_seconds=elapsed_seconds,
+            )
+        if patience_left <= 0:
+            print(f"Early stopping at epoch {epoch:03d}. Best validation F1 = {best_val_f1:.4f}", flush=True)
+            break
 
     if best_state is None:
         raise RuntimeError("Training did not produce a valid checkpoint.")
@@ -121,20 +309,22 @@ def train_experiment(config: dict[str, Any], dataset, variant_name: str) -> Trai
         row.update({"split": split_name, "experiment": variant_name})
         metrics.append(row)
 
-    checkpoint_path = Path(config["paths"]["checkpoint_dir"]) / f"{variant_name}.pt"
+    checkpoint_path = checkpoint_dir / f"{variant_name}.pt"
     torch.save(
-        {
-            "variant_name": variant_name,
-            "variant": deepcopy(EXPERIMENT_VARIANTS[variant_name]),
-            "state_dict": model.state_dict(),
-            "history": history,
-            "metrics": metrics,
-            "selected_snapshot_dates": dataset.meta["selected_snapshot_dates"],
-        },
+        _build_checkpoint_payload(
+            variant_name=variant_name,
+            state_dict=model.state_dict(),
+            history=history,
+            selected_snapshot_dates=selected_snapshot_dates,
+            metrics=metrics,
+            epoch=len(history),
+            best_val_f1=best_val_f1,
+            is_partial=False,
+        ),
         checkpoint_path,
     )
     metrics_frame = export_metrics_table(metrics, Path(config["paths"]["table_dir"]) / f"{variant_name}_metrics.csv")
-    dump_json(history, Path(config["paths"]["log_dir"]) / f"{variant_name}_history.json")
+    dump_json(history, log_dir / f"{variant_name}_history.json")
     return TrainArtifacts(checkpoint_path=checkpoint_path, metrics_frame=metrics_frame, logits=logits.cpu(), aux={k: (v.cpu() if isinstance(v, torch.Tensor) else v) for k, v in aux.items()}, variant_name=variant_name)
 
 

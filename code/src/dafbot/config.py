@@ -70,6 +70,8 @@ def load_config(config_path: str | Path | None = None) -> dict[str, Any]:
             "learning_rate": 1e-3,
             "weight_decay": 1e-4,
             "patience": 8,
+            "log_every": 1,
+            "save_every": 1,
             "lambda_modal": 0.0,
             "lambda_temporal": 0.0,
         },

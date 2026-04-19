@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import csv
 import json
+import warnings
 from collections import Counter, defaultdict
 from datetime import datetime, timezone
 from pathlib import Path
@@ -59,6 +60,14 @@ def stream_json_array(path: Path, chunk_size: int = 1_048_576) -> Iterable[dict[
             if reached_eof:
                 trailing = buffer.strip()
                 if trailing and trailing != "]":
+                    possible_record = trailing.lstrip(",").lstrip()
+                    if possible_record.startswith("{"):
+                        warnings.warn(
+                            f"{path} ended with a truncated JSON object; ignoring the incomplete trailing record.",
+                            RuntimeWarning,
+                            stacklevel=2,
+                        )
+                        return
                     raise ValueError(f"Unexpected trailing content in {path}.")
                 return
 
