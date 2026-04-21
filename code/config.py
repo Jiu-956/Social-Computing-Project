@@ -4,6 +4,23 @@ from dataclasses import dataclass, field
 from pathlib import Path
 
 
+RAW_DATA_FILES = ("edge.csv", "label.csv", "split.csv", "node.json")
+
+
+def _contains_raw_dataset_files(path: Path) -> bool:
+    return all((path / file_name).exists() for file_name in RAW_DATA_FILES)
+
+
+def resolve_data_dir(data_dir: Path) -> Path:
+    candidate = data_dir.expanduser()
+    if _contains_raw_dataset_files(candidate):
+        return candidate
+    nested_raw_dir = candidate / "raw"
+    if _contains_raw_dataset_files(nested_raw_dir):
+        return nested_raw_dir
+    return candidate
+
+
 @dataclass(slots=True)
 class ProjectConfig:
     data_dir: Path = Path("data")
@@ -48,7 +65,7 @@ class ProjectConfig:
     figures_dir: Path = field(init=False)
 
     def __post_init__(self) -> None:
-        self.data_dir = Path(self.data_dir)
+        self.data_dir = resolve_data_dir(Path(self.data_dir))
         self.output_dir = Path(self.output_dir)
         self.cache_dir = self.output_dir / "cache"
         self.models_dir = self.output_dir / "models"

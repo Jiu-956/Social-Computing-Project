@@ -20,6 +20,8 @@ python -m code report
 python -m code run-all
 ```
 
+默认 `--data-dir` 为 `data`，程序会自动识别并读取 `data/raw`。你也可以显式指定 `--data-dir data/raw`。
+
 ## 仓库结构
 
 ```text
@@ -31,7 +33,7 @@ README_METHOD.md       方法设计与分析逻辑文档
 
 其中核心模块的职责如下：
 
-- `code/data.py`：读取 `label.csv`、`split.csv`、`edge.csv`、`node.json`，生成用户级样本。
+- `code/data.py`：读取 `data/raw/label.csv`、`data/raw/split.csv`、`data/raw/edge.csv`、`data/raw/node.json`，生成用户级样本。
 - `code/experiments.py`：统一训练 F / T / G / FT / FG / FTG 六类方法。
 - `code/interpretation.py`：生成信息源增益、融合消融和解释性信号表。
 - `code/visualization.py`：生成围绕三个研究问题的可视化图片。

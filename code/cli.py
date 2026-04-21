@@ -13,7 +13,12 @@ from .visualization import generate_visualizations
 
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description="TwiBot-20 bot detection research pipeline")
-    parser.add_argument("--data-dir", type=Path, default=Path("data"))
+    parser.add_argument(
+        "--data-dir",
+        type=Path,
+        default=Path("data"),
+        help="Directory containing edge.csv/node.json/split.csv/label.csv, or its parent directory that contains raw/.",
+    )
     parser.add_argument("--output-dir", type=Path, default=Path("artifacts"))
     parser.add_argument("--max-graph-users", type=int, default=None)
     parser.add_argument("--max-tweets-per-user", type=int, default=12)

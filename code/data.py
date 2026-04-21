@@ -16,6 +16,7 @@ from .config import ProjectConfig
 
 LOGGER = logging.getLogger(__name__)
 TWITTER_TIME_FORMAT = "%a %b %d %H:%M:%S %z %Y"
+REQUIRED_RAW_FILES = ("edge.csv", "node.json", "split.csv", "label.csv")
 
 
 @dataclass(slots=True)
@@ -70,10 +71,35 @@ def stream_json_array(path: Path, chunk_size: int = 1_048_576) -> Iterable[dict[
                 buffer = buffer[offset:]
                 parsed = True
 
+            # If decoding made no progress, pull another chunk even when the
+            # current buffer is already >= chunk_size to avoid a stall loop.
+            if not parsed and not reached_eof:
+                chunk = handle.read(chunk_size)
+                if chunk:
+                    buffer += chunk
+                else:
+                    reached_eof = True
+
             if reached_eof:
                 trailing = buffer.strip()
-                if trailing and trailing != "]":
-                    raise ValueError(f"Unexpected trailing content while parsing {path}.")
+                if not trailing:
+                    return
+                if trailing == "]":
+                    return
+                if trailing.startswith("]"):
+                    remainder = trailing[1:].strip()
+                    if not remainder:
+                        return
+                    LOGGER.warning(
+                        "Ignoring trailing content after closing JSON array while parsing %s.",
+                        path,
+                    )
+                    return
+                LOGGER.warning(
+                    "Reached EOF with incomplete JSON content while parsing %s. "
+                    "Continuing with parsed records; the source file may be truncated.",
+                    path,
+                )
                 return
 
             if not parsed and len(buffer) > chunk_size * 8:
@@ -82,6 +108,7 @@ def stream_json_array(path: Path, chunk_size: int = 1_048_576) -> Iterable[dict[
 
 def prepare_dataset(config: ProjectConfig) -> PreparedDataset:
     config.ensure_directories()
+    _validate_raw_data_files(config)
 
     users = _load_user_splits_and_labels(config)
     graph_user_ids = set(users["user_id"])
@@ -184,6 +211,21 @@ def _load_user_splits_and_labels(config: ProjectConfig) -> pd.DataFrame:
     users["label_id"] = users["label"].map({"human": 0, "bot": 1}).fillna(-1).astype(int)
     users["is_labeled"] = users["label_id"] >= 0
     return users
+
+
+def _validate_raw_data_files(config: ProjectConfig) -> None:
+    missing_files = [file_name for file_name in REQUIRED_RAW_FILES if not (config.data_dir / file_name).exists()]
+    if not missing_files:
+        return
+
+    required = ", ".join(REQUIRED_RAW_FILES)
+    missing = ", ".join(missing_files)
+    raise FileNotFoundError(
+        "Raw dataset files are missing under "
+        f"{config.data_dir}. Missing: {missing}. "
+        f"Expected files: {required}. "
+        "You can pass --data-dir to either the raw directory itself or its parent directory that contains raw/."
+    )
 
 
 def _sample_graph_users(users: pd.DataFrame, max_graph_users: int, seed: int) -> pd.DataFrame:

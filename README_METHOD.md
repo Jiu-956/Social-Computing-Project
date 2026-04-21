@@ -21,10 +21,12 @@
 
 项目直接使用 `TwiBot-20` 原始文件：
 
-- `data/label.csv`
-- `data/split.csv`
-- `data/edge.csv`
-- `data/node.json`
+- `data/raw/label.csv`
+- `data/raw/split.csv`
+- `data/raw/edge.csv`
+- `data/raw/node.json`
+
+默认命令参数 `--data-dir data` 会自动识别并读取 `data/raw`；也可以显式传入 `--data-dir data/raw`。
 
 ### 2.2 为什么使用流式解析
 
