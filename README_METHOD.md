@@ -96,6 +96,8 @@
 - `feature_text_graph_gcn`
 - `feature_text_graph_gat`
 - `feature_text_graph_botrgcn`
+- `feature_text_graph_botsai`
+- `feature_text_graph_botdgt`
 
 这里的差异来自：
 
@@ -209,6 +211,21 @@
 - 输入结构与 GCN/GAT 相同；
 - 用 `RGCNConv` 区分 `follow` 与 `friend` 等关系类型；
 - 适合回答“图结构是否只有在关系感知传播里才真正发挥作用”。
+
+### `feature_text_graph_botsai`
+
+- 参考 BotSAI 的核心思想，把 description / tweet / 数值属性 / 类别属性分别投影为“共享不变表示 + 模态特定表示”；
+- 通过自注意力在四种模态通道上做融合，再结合关系感知的图 Transformer 传播；
+- 训练时增加不变表示约束项，强调跨模态稳定信号，降低单模态噪声干扰。
+
+### `feature_text_graph_botdgt`
+
+- 参考 BotDGT 的核心思想，基于账号年龄构建由稀到密的细粒度动态图快照序列（当前默认 8 个快照）；
+- 快照构建阶段显式施加“单调累积约束”，保证后续快照包含前序已出现的关系边；
+- 每个快照内用图 Transformer 提取结构表示，再叠加位置编码（结构密度代理 + 双向链接比 + 当前保留比例）；
+- 在时间维上使用 attention / GRU / LSTM 聚合快照，并联合优化时序平滑约束与跨步一致性约束，强化时间建模稳定性。
+
+> 注：当前仓库的 BotSAI / BotDGT 为“论文思想驱动的工程化实现”，用于在统一 TwiBot-20 流水线中做可比实验，不等同于官方实现的逐行复现。
 
 ## 5. 解释性分析模块现在负责什么
 

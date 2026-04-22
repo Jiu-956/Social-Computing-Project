@@ -55,6 +55,14 @@ class ProjectConfig:
     gnn_learning_rate: float = 1e-2
     gnn_weight_decay: float = 5e-2
     gnn_dropout: float = 0.1
+    botsai_invariant_weight: float = 0.05
+    botsai_attention_heads: int = 4
+    botdgt_snapshot_count: int = 8
+    botdgt_min_keep_ratio: float = 0.15
+    botdgt_temporal_module: str = "attention"
+    botdgt_temporal_heads: int = 4
+    botdgt_temporal_smoothness_weight: float = 0.05
+    botdgt_temporal_consistency_weight: float = 0.03
 
     visualization_sample_size: int = 3000
     random_state: int = 42

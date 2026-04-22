@@ -66,7 +66,7 @@ README_METHOD.md       方法设计与分析逻辑文档
 这部分不只比较“模型名不同”，而是分析：
 
 - 增加一种信息后，方法族之间的差异来自哪里；
-- 同样都使用特征、文本、图信息时，简单拼接、GCN、GAT、BotRGCN 等方法为什么会出现差距。
+- 同样都使用特征、文本、图信息时，简单拼接、GCN、GAT、BotRGCN、BotSAI、BotDGT 等方法为什么会出现差距。
 
 ### 问题三：结果是否可解释？
 
@@ -108,7 +108,7 @@ pip install -r requirements.txt
 
 #### `torch-geometric`
 
-`GCN`、`GAT`、`BotRGCN` 依赖 `torch-geometric`。
+`GCN`、`GAT`、`BotRGCN`、`BotSAI`、`BotDGT` 依赖 `torch-geometric`。
 
 - 安装成功：可以运行完整六类方法。
 - 安装失败：可以先跳过 GNN。
@@ -151,6 +151,8 @@ python -m code run-all
 - `feature_text_graph_gcn`
 - `feature_text_graph_gat`
 - `feature_text_graph_botrgcn`
+- `feature_text_graph_botsai`
+- `feature_text_graph_botdgt`
 
 这些方法不是孤立堆在一起，而是统一映射到 F / T / G / FT / FG / FTG 六类方法族中，方便做横向对比与解释。
 

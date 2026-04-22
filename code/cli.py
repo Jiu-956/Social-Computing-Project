@@ -48,6 +48,19 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--gnn-learning-rate", type=float, default=1e-2)
     parser.add_argument("--gnn-weight-decay", type=float, default=5e-2)
     parser.add_argument("--gnn-dropout", type=float, default=0.1)
+    parser.add_argument("--botsai-invariant-weight", type=float, default=0.05)
+    parser.add_argument("--botsai-attention-heads", type=int, default=4)
+    parser.add_argument("--botdgt-snapshot-count", type=int, default=8)
+    parser.add_argument("--botdgt-min-keep-ratio", type=float, default=0.15)
+    parser.add_argument(
+        "--botdgt-temporal-module",
+        type=str,
+        default="attention",
+        choices=("attention", "gru", "lstm"),
+    )
+    parser.add_argument("--botdgt-temporal-heads", type=int, default=4)
+    parser.add_argument("--botdgt-temporal-smoothness-weight", type=float, default=0.05)
+    parser.add_argument("--botdgt-temporal-consistency-weight", type=float, default=0.03)
 
     parser.add_argument("--visualization-sample-size", type=int, default=3000)
     parser.add_argument("--random-state", type=int, default=42)
@@ -87,6 +100,14 @@ def make_config(args: argparse.Namespace) -> ProjectConfig:
         gnn_learning_rate=args.gnn_learning_rate,
         gnn_weight_decay=args.gnn_weight_decay,
         gnn_dropout=args.gnn_dropout,
+        botsai_invariant_weight=args.botsai_invariant_weight,
+        botsai_attention_heads=args.botsai_attention_heads,
+        botdgt_snapshot_count=args.botdgt_snapshot_count,
+        botdgt_min_keep_ratio=args.botdgt_min_keep_ratio,
+        botdgt_temporal_module=args.botdgt_temporal_module,
+        botdgt_temporal_heads=args.botdgt_temporal_heads,
+        botdgt_temporal_smoothness_weight=args.botdgt_temporal_smoothness_weight,
+        botdgt_temporal_consistency_weight=args.botdgt_temporal_consistency_weight,
         visualization_sample_size=args.visualization_sample_size,
         random_state=args.random_state,
     )

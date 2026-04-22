@@ -460,6 +460,8 @@ def _format_ftg_experiment_name(experiment_name: str) -> str:
         "feature_text_graph_gcn": "GCN",
         "feature_text_graph_gat": "GAT",
         "feature_text_graph_botrgcn": "BotRGCN",
+        "feature_text_graph_botsai": "BotSAI",
+        "feature_text_graph_botdgt": "BotDGT",
     }
     return mapping.get(experiment_name, experiment_name)
 
