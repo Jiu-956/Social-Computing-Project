@@ -126,6 +126,7 @@ def prepare_dataset(config: ProjectConfig) -> PreparedDataset:
 
     merged = users.merge(profile_df, on="user_id", how="left").merge(graph_stats, on="user_id", how="left")
     merged = merged.merge(tweet_df, on="user_id", how="left")
+    merged = _compute_account_age_bucket(merged)
     for text_column in ("description_text", "tweet_text", "username", "display_name"):
         if text_column in merged.columns:
             merged[text_column] = merged[text_column].fillna("")
@@ -465,12 +466,27 @@ def _gnn_num_property_columns() -> list[str]:
         "following_count",
         "tweet_count",
         "account_age_days",
+        "account_age_bucket",
         "username_length",
     ]
 
 
 def _gnn_cat_property_columns() -> list[str]:
     return ["is_protected", "is_verified", "default_profile_image"]
+
+
+def _compute_account_age_bucket(users: pd.DataFrame) -> pd.DataFrame:
+    if "account_age_days" not in users.columns:
+        users["account_age_bucket"] = 1
+        return users
+    age = pd.to_numeric(users["account_age_days"], errors="coerce").fillna(0.0)
+    q33, q67 = age.quantile([0.33, 0.67]).values
+    users["account_age_bucket"] = pd.cut(
+        age,
+        bins=[-float("inf"), q33, q67, float("inf")],
+        labels=[0, 1, 2],
+    ).astype(float).fillna(1.0).astype(int)
+    return users
 
 
 def _is_manifest_compatible(manifest: dict[str, Any]) -> bool:

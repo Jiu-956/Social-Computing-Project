@@ -4,6 +4,7 @@ from .botrgcn import FeatureTextGraphBotRGCN
 from .botsai import FeatureTextGraphBotSAI
 from .gat import FeatureTextGraphGAT
 from .gcn import FeatureTextGraphGCN
+from .tign import FeatureTextGraphTIGN
 
 __all__ = [
     "_FeatureTextGraphBase",
@@ -13,4 +14,5 @@ __all__ = [
     "FeatureTextGraphBotRGCN",
     "FeatureTextGraphBotSAI",
     "FeatureTextGraphBotDGT",
+    "FeatureTextGraphTIGN",
 ]

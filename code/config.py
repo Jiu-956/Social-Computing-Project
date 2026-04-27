@@ -63,6 +63,8 @@ class ProjectConfig:
     botdgt_temporal_heads: int = 4
     botdgt_temporal_smoothness_weight: float = 0.05
     botdgt_temporal_consistency_weight: float = 0.03
+    tign_num_age_buckets: int = 3
+    tign_intra_class_weight: float = 0.02
 
     visualization_sample_size: int = 3000
     random_state: int = 42

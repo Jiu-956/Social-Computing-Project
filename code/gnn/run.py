@@ -16,6 +16,7 @@ except Exception:  # pragma: no cover
 
 from ..config import ProjectConfig
 from .builders import (
+    _build_age_relation_graph,
     _build_botdgt_snapshot_bundle,
     _build_combined_edge_index,
     _build_relation_graph,
@@ -26,6 +27,7 @@ from .models import (
     FeatureTextGraphBotSAI,
     FeatureTextGraphGAT,
     FeatureTextGraphGCN,
+    FeatureTextGraphTIGN,
 )
 from .train import _scaled_tensor, _train_gnn_model, GNNResult
 
@@ -65,6 +67,13 @@ def run_graph_neural_models(
     id_to_index = {user_id: index for index, user_id in enumerate(user_ids)}
     combined_edge_index = _build_combined_edge_index(id_to_index, graph_edges)
     relation_edge_index, relation_edge_type = _build_relation_graph(id_to_index, graph_edges)
+
+    num_age_buckets = config.tign_num_age_buckets
+    user_age_buckets_np = pd.to_numeric(users["account_age_bucket"], errors="coerce").fillna(1).to_numpy(dtype=np.int64)
+    user_age_buckets_tensor = torch.tensor(user_age_buckets_np, dtype=torch.long)
+    age_relation_edge_index, age_relation_edge_type = _build_age_relation_graph(
+        id_to_index, user_age_buckets_tensor, graph_edges, num_age_buckets=num_age_buckets
+    )
 
     outputs = []
     model_specs: list[tuple[str, Any, Any, Any]] = [
@@ -153,11 +162,29 @@ def run_graph_neural_models(
                     dynamic_bundle,
                     None,
                 ),
+                (
+                    "feature_text_graph_tign",
+                    FeatureTextGraphTIGN(
+                        hidden_dim=config.gnn_hidden_dim,
+                        description_dim=description_tensor.shape[1],
+                        tweet_dim=tweet_tensor.shape[1],
+                        num_prop_dim=num_prop_tensor.shape[1],
+                        cat_prop_dim=cat_prop_tensor.shape[1],
+                        dropout=config.gnn_dropout,
+                        num_age_buckets=num_age_buckets,
+                        relation_count=2,
+                        invariant_weight=config.botsai_invariant_weight,
+                        intra_class_weight=config.tign_intra_class_weight,
+                        attention_heads=config.botsai_attention_heads,
+                    ),
+                    age_relation_edge_index,
+                    age_relation_edge_type,
+                ),
             ]
         )
     else:
         LOGGER.warning(
-            "TransformerConv is unavailable, skipping feature_text_graph_botsai and feature_text_graph_botdgt."
+            "TransformerConv is unavailable, skipping feature_text_graph_botsai, feature_text_graph_botdgt and feature_text_graph_tign."
         )
 
     for name, model, edge_index, edge_type in model_specs:

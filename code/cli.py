@@ -61,6 +61,8 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--botdgt-temporal-heads", type=int, default=4)
     parser.add_argument("--botdgt-temporal-smoothness-weight", type=float, default=0.05)
     parser.add_argument("--botdgt-temporal-consistency-weight", type=float, default=0.03)
+    parser.add_argument("--tign-num-age-buckets", type=int, default=3)
+    parser.add_argument("--tign-intra-class-weight", type=float, default=0.02)
 
     parser.add_argument("--visualization-sample-size", type=int, default=3000)
     parser.add_argument("--random-state", type=int, default=42)
@@ -108,6 +110,8 @@ def make_config(args: argparse.Namespace) -> ProjectConfig:
         botdgt_temporal_heads=args.botdgt_temporal_heads,
         botdgt_temporal_smoothness_weight=args.botdgt_temporal_smoothness_weight,
         botdgt_temporal_consistency_weight=args.botdgt_temporal_consistency_weight,
+        tign_num_age_buckets=args.tign_num_age_buckets,
+        tign_intra_class_weight=args.tign_intra_class_weight,
         visualization_sample_size=args.visualization_sample_size,
         random_state=args.random_state,
     )
