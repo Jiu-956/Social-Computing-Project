@@ -5,8 +5,8 @@ import logging
 from pathlib import Path
 
 from .config import ProjectConfig
+from .baselines import run_experiments
 from .data import prepare_dataset
-from .experiments import run_experiments
 from .reporting import generate_report
 from .visualization import generate_visualizations
 
