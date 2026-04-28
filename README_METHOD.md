@@ -1,314 +1,146 @@
-# 方法文档
+# 方法设计与实现
 
-## 1. 方法设计不再只围绕“谁分数最高”
+本文档说明每个方法的核心机制与实现要点。阅读前提：已了解 README.md 中的项目结构与研究问题背景。
 
-本项目现在用统一框架回答三个研究问题：
+## 1. 方法族映射
 
-1. 哪类信息更有效？
-2. 不同方法差异在哪里？
-3. 结果是否可解释？
+每个具体方法映射到一个信息源方法族（F/T/G/FT/FG/FTG），方便横向对比。
 
-因此，方法文档的组织顺序也对应调整为：
+| 方法名 | 方法族 | 信息源 |
+|--------|--------|--------|
+| `feature_only_logistic_regression` | F | 用户属性 |
+| `feature_only_random_forest` | F | 用户属性 |
+| `text_only_tfidf_logistic_regression` | T | 文本（TF-IDF） |
+| `text_only_transformer_logistic_regression` | T | 文本（Transformer） |
+| `graph_only_structure_random_forest` | G | 图结构统计 |
+| `graph_only_node2vec_logistic_regression` | G | 图嵌入（Node2Vec） |
+| `feature_text_tfidf_logistic_regression` | FT | 属性 + 文本 |
+| `feature_text_transformer_logistic_regression` | FT | 属性 + 文本 |
+| `feature_graph_random_forest` | FG | 属性 + 图 |
+| `feature_graph_node2vec_logistic_regression` | FG | 属性 + 图 |
+| `feature_text_graph_tfidf_node2vec_lr` | FTG | 属性 + 文本 + 图 |
+| `feature_text_graph_gcn` | FTG | 属性 + 文本 + 图 |
+| `feature_text_graph_gat` | FTG | 属性 + 文本 + 图 |
+| `feature_text_graph_botrgcn` | FTG | 属性 + 文本 + 图 |
+| `feature_text_graph_botsai` | FTG | 属性 + 文本 + 图 |
+| `feature_text_graph_botdgt` | FTG | 属性 + 文本 + 图 |
+| `feature_text_graph_tign` | FTG | 属性 + 文本 + 图（创新） |
 
-- 数据如何被整理成统一输入；
-- 六类方法如何映射到研究问题；
-- 解释性分析如何和实验结果接起来；
-- 哪些代码模块分别负责训练、解释和可视化。
+## 2. 基线方法（sklearn）
 
-## 2. 数据组织与输入表示
+### 2.1 特征类（F）
 
-### 2.1 原始输入文件
+- `feature_only_logistic_regression`：仅用数值/类别属性，最直接的基线，可解释性强
+- `feature_only_random_forest`：非线性融合，可输出特征重要性
 
-项目直接使用 `TwiBot-20` 原始文件：
+### 2.2 文本类（T）
 
-- `data/raw/label.csv`
-- `data/raw/split.csv`
-- `data/raw/edge.csv`
-- `data/raw/node.json`
+- `text_only_tfidf_logistic_regression`：description + tweet 合并，TF-IDF 向量化，适合抓关键词
+- `text_only_transformer_logistic_regression`：SentenceTransformer 稠密嵌入，更偏语义相似性
 
-默认命令参数 `--data-dir data` 会自动识别并读取 `data/raw`；也可以显式传入 `--data-dir data/raw`。
+### 2.3 图类（G）
 
-### 2.2 为什么使用流式解析
+- `graph_only_structure_random_forest`：仅用度数、聚类系数等结构统计特征
+- `graph_only_node2vec_logistic_regression`：Node2Vec 学习拓扑位置嵌入
 
-`node.json` 体积很大，因此代码不会一次性全部读入内存，而是流式解析 JSON 数组。
+### 2.4 双源融合（FT / FG）
 
-对应实现：
+- 属性 + TF-IDF / Transformer：结构化特征与文本关键词/语义的拼接融合
+- 属性 + 图统计 / Node2Vec：账号画像与网络位置的融合
 
-- `code/data.py`
+### 2.5 三源拼接基线（FTG）
 
-### 2.3 用户级样本包含什么
+- `feature_text_graph_tfidf_node2vec_lr`：属性 + TF-IDF + Node2Vec 拼接，适合做消融分析
 
-数据准备结束后，用户级样本会统一整理为：
+## 3. 图神经网络（torch-geometric）
 
-- `user_id`
-- `split`：`train / val / test / support`
-- `label_id`：`机器人 / 人类`
-- `description_text`
-- `tweet_text`
-- `combined_text`
-- 用户属性特征
-- 图结构统计特征
+所有 GNN 模型共享同一输入结构：description 嵌入、tweet 嵌入、数值属性、类别属性、边索引。
 
-### 2.4 为什么保留 support 节点
+### 3.1 `feature_text_graph_gcn`
 
-`support` 节点没有分类标签，但它们仍然是图的一部分。对于 `GCN`、`GAT`、`BotRGCN` 这类图神经网络，support 节点能提供邻居上下文，因此不能简单删除。
+最基础的图卷积网络。使用 `GCNConv` 在无向图上均匀聚合邻居信息，作为融合基线。
 
-## 3. 六类方法如何映射到三个问题
+### 3.2 `feature_text_graph_gat`
 
-### 3.1 问题一：哪类信息更有效？
+用 `GATConv` 替代 GCN，通过注意力机制为不同邻居分配不同权重。适合观察注意力机制是否优于均匀聚合。
 
-这一步首先看单源方法：
+### 3.3 `feature_text_graph_botrgcn`
 
-- F：只看用户属性
-- T：只看文本语义
-- G：只看图结构
+用 `RGCNConv` 区分边类型（follow / friend），回答"关系感知传播是否让图结构真正发挥作用"。
 
-然后再看双源和三源方法：
+### 3.4 `feature_text_graph_botsai`
 
-- FT：属性 + 文本
-- FG：属性 + 图
-- FTG：属性 + 文本 + 图
+核心机制：
+1. **模态分解**：每个模态（description / tweet / 数值属性 / 类别属性）分别投影为 invariant（不变表示）+ specific（特定表示）
+2. **通道自注意力融合**：四个模态通道经 `MultiheadAttention` 融合
+3. **图传播**：用 `TransformerConv` + 关系嵌入做结构传播
+4. **不变性约束**：训练时加入 `inv_loss = invariant_weight * (invariance_loss + 0.5 * specific_overlap)`
 
-因此，“哪类信息更有效”不是只比较一个模型，而是比较六类方法族之间的表现，以及加入某类信息后平均会带来多少增益。
+### 3.5 `feature_text_graph_botdgt`
 
-### 3.2 问题二：不同方法差异在哪里？
+核心机制：
+1. **动态快照**：按账号年龄分位数由稀到密构建 8 个图快照，边单调累积
+2. **快照位置编码**：clustering_proxy、bidirectional_ratio、edge_density、keep_ratio
+3. **时间维聚合**：attention / GRU / LSTM 聚合多快照表示
+4. **时序约束**：smoothness_weight × 平滑损失 + consistency_weight × 一致性损失
 
-这里主要看两层差异：
+> BotSAI / BotDGT 为"论文思想驱动的工程化实现"，用于在统一流水线中做可比实验，不等同于官方逐行复现。
 
-#### 第一层：信息差异
+### 3.6 `feature_text_graph_tign`（创新方法）
 
-例如：
+在 BotSAI 基础上引入**年龄感知动态关系嵌入**：
 
-- 从 `text_only` 到 `feature_text`，是在“只用文本”基础上增加了用户属性；
-- 从 `feature_text` 到 `feature_text_graph`，是在“属性 + 文本”基础上增加了图结构。
+**动机**：BotSAI 仅区分 follow / friend 两种边类型，没有利用账户年龄信息。账户年龄是机器人检测的重要特征，老账号→新账号的边关系与新账号→老账号应有不同权重。
 
-这层差异由：
+**边类型设计**：
+- 边类型 = `(关系类型) × (源账户年龄桶) × (目标账户年龄桶)`
+- 默认 3 个年龄桶（young / middle / old），共 2 × 3 × 3 = **18 种边类型**
+- 年龄桶按 account_age_days 的 33%/67% 分位数划分
 
-- `source_contribution_details.csv`
-
-来描述。
-
-#### 第二层：融合机制差异
-
-即使都使用特征、文本、图三类信息，不同方法仍然会不同：
-
-- `feature_text_graph_tfidf_node2vec_logistic_regression`
-- `feature_text_graph_gcn`
-- `feature_text_graph_gat`
-- `feature_text_graph_botrgcn`
-- `feature_text_graph_botsai`
-- `feature_text_graph_botdgt`
-
-这里的差异来自：
-
-- 简单拼接 vs 图传播
-- 普通图卷积 vs 注意力传播
-- 同质传播 vs 关系感知传播
-
-### 3.3 问题三：结果是否可解释？
-
-这一步不只看分数，而是做两类解释：
-
-#### 信息源层面的解释
-
-- 平均增益：加入某类信息后平均提升多少；
-- 消融实验：在最佳可解释融合基线中，移除某类信息后损失多少。
-
-#### 信号层面的解释
-
-- 用户属性：模型主要在看哪些账号画像异常；
-- 文本语义：模型主要抓哪些词或短语；
-- 图结构：模型主要抓哪些关系模式。
-
-## 4. 六类方法本身的角色
-
-## 4.1 基于特征（F）
-
-### `feature_only_logistic_regression`
-
-- 只使用用户属性特征；
-- 适合作为最直接、最可解释的基线；
-- 有助于回答“单看账号画像是否足够识别机器人”。
-
-### `feature_only_random_forest`
-
-- 仍然只使用用户属性；
-- 允许非线性关系；
-- 可直接输出特征重要性，适合做解释性图表。
-
-## 4.2 基于文本（T）
-
-### `text_only_tfidf_logistic_regression`
-
-- 把简介和 tweet 合并为文本；
-- 使用 TF-IDF；
-- 适合抓关键词和短语层面的可解释信号。
-
-### `text_only_transformer_logistic_regression`
-
-- 使用 SentenceTransformer 生成稠密文本表示；
-- 更偏语义相似性；
-- 适合与 TF-IDF 对照，观察“关键词”和“语义嵌入”谁更有效。
-
-## 4.3 基于图（G）
-
-### `graph_only_structure_random_forest`
-
-- 只使用结构统计特征；
-- 用来回答“网络连接形态本身是否足够区分机器人和人类”。
-
-### `graph_only_node2vec_logistic_regression`
-
-- 用 `Node2Vec` 学习节点在图中的结构角色；
-- 比单纯度数统计更强调整体拓扑位置。
-
-## 4.4 基于特征和文本（FT）
-
-### `feature_text_tfidf_logistic_regression`
-
-- 将用户属性与 TF-IDF 拼接；
-- 是最直接的“结构化特征 + 文本关键词”融合基线。
-
-### `feature_text_transformer_logistic_regression`
-
-- 将用户属性与 Transformer 文本嵌入拼接；
-- 检查“文本语义与结构化属性是否互补”。
-
-## 4.5 基于特征和图（FG）
-
-### `feature_graph_random_forest`
-
-- 将用户属性与图统计特征一起输入；
-- 适合观察“加图统计后是否稳定提升”。
-
-### `feature_graph_node2vec_logistic_regression`
-
-- 将用户属性、图统计和图嵌入一起输入；
-- 用于观察“账号画像 + 网络位置”是否互补。
-
-## 4.6 基于特征、文本和图（FTG）
-
-### `feature_text_graph_tfidf_node2vec_logistic_regression`
-
-- 把属性、TF-IDF 文本、Node2Vec 一起拼接；
-- 是非 GNN 的可解释融合基线；
-- 适合做消融分析。
-
-### `feature_text_graph_gcn`
-
-- 输入 description、tweet、数值属性、类别属性和边；
-- 用 `GCNConv` 在图上传播；
-- 对应最基础的图神经融合方式。
-
-### `feature_text_graph_gat`
-
-- 输入结构与 GCN 相同；
-- 用 `GATConv` 对不同邻居分配不同权重；
-- 适合观察注意力传播是否优于普通卷积。
-
-### `feature_text_graph_botrgcn`
-
-- 输入结构与 GCN/GAT 相同；
-- 用 `RGCNConv` 区分 `follow` 与 `friend` 等关系类型；
-- 适合回答“图结构是否只有在关系感知传播里才真正发挥作用”。
-
-### `feature_text_graph_botsai`
-
-- 参考 BotSAI 的核心思想，把 description / tweet / 数值属性 / 类别属性分别投影为“共享不变表示 + 模态特定表示”；
-- 通过自注意力在四种模态通道上做融合，再结合关系感知的图 Transformer 传播；
-- 训练时增加不变表示约束项，强调跨模态稳定信号，降低单模态噪声干扰。
-
-### `feature_text_graph_botdgt`
-
-- 参考 BotDGT 的核心思想，基于账号年龄构建由稀到密的细粒度动态图快照序列（当前默认 8 个快照）；
-- 快照构建阶段显式施加“单调累积约束”，保证后续快照包含前序已出现的关系边；
-- 每个快照内用图 Transformer 提取结构表示，再叠加位置编码（结构密度代理 + 双向链接比 + 当前保留比例）；
-- 在时间维上使用 attention / GRU / LSTM 聚合快照，并联合优化时序平滑约束与跨步一致性约束，强化时间建模稳定性。
-
-> 注：当前仓库的 BotSAI / BotDGT 为“论文思想驱动的工程化实现”，用于在统一 TwiBot-20 流水线中做可比实验，不等同于官方实现的逐行复现。
-
-## 5. 解释性分析模块现在负责什么
-
-对应实现：
-
-- `code/interpretation.py`
-
-它现在负责三类输出：
-
-### 5.1 信息源平均增益
-
-输出：
-
-- `artifacts/tables/source_contribution_summary.csv`
-- `artifacts/tables/source_contribution_details.csv`
-
-作用：
-
-- 说明加入用户属性、文本语义、图结构后，平均会带来多大提升；
-- 说明哪些方法差异来自“增加了什么信息”。
-
-### 5.2 融合模型消融
-
-输出：
-
-- `artifacts/tables/source_ablation.csv`
-
-作用：
-
-- 说明在最佳可解释融合基线中，哪类信息是核心输入，哪类信息只是边际补充。
-
-### 5.3 解释性信号表
-
-输出：
-
-- `artifacts/tables/feature_signals.csv`
-- `artifacts/tables/text_signals.csv`
-- `artifacts/tables/graph_signals.csv`
-
-作用：
-
-- 用户属性：哪些账号特征更像机器人，哪些更像人类；
-- 文本：哪些关键词/短语更像机器人，哪些更像人类；
-- 图结构：哪些结构统计模式更像机器人，哪些更像人类。
-
-## 6. 可视化模块现在回答什么
-
-对应实现：
-
-- `code/visualization.py`
-
-现在新增并重点维护三张问题导向图：
-
-- `artifacts/figures/information_effectiveness.png`
-  回答“哪类信息更有效”。
-
-- `artifacts/figures/method_differences.png`
-  回答“不同方法差异在哪里”。
-
-- `artifacts/figures/explainability_signals.png`
-  回答“结果是否可解释”。
-
-- `artifacts/figures/feature_signal_map.png`
-  把“重要特征”与“机器人 / 人类方向差异”放在一张图里。
-
-- `artifacts/figures/embedding_separation_map.png`
-  展示文本语义嵌入和图嵌入在二维空间里的类分布与重叠程度。
-
-- `artifacts/figures/local_network_patterns.png`
-  展示高置信机器人 / 人类的局部网络子图和关注 / 好友关系模式。
-
-当前保留的核心图主要就是上面这几张，目的是让汇报时始终围绕“整体表现 -> 信息贡献 -> 可解释性”这一条主线展开，而不是再回到零散的中间分析图。
-
-## 7. 报告模块现在怎么组织
-
-对应实现：
-
-- `code/reporting.py`
-
-生成的 `artifacts/report.md` 现在不再按“先贴一堆排行榜，再做零散解释”的方式组织，而是直接按三个问题展开：
-
-1. 哪类信息更有效？
-2. 不同方法差异在哪里？
-3. 结果是否可解释？
-
-这样 `README`、方法文档、可视化、自动报告会保持同一条逻辑主线，而不是各写各的。
+**动态边嵌入生成**（`tign.py` `_build_edge_attr`）：
+```
+边嵌入 = MLP([关系类型嵌入; 源年龄桶嵌入; 目标年龄桶嵌入])
+```
+即不是查表得到固定向量，而是由三者经 MLP 动态生成。
+
+**模型结构**：
+```
+模态编码 → 模态分解（invariant + specific）
+  → 通道自注意力融合
+  → 动态边嵌入生成（关系+年龄三因素 MLP）
+  → TransformerConv 图传播（含残差连接）
+  → 分类头
+
+损失 = CrossEntropy + λ₁ × 不变性损失 + λ₂ × 类别内方差
+```
+
+**关键超参数**：
+| 参数 | 说明 | 默认值 |
+|------|------|--------|
+| `--tign-num-age-buckets` | 年龄桶数 | 3 |
+| `--tign-intra-class-weight` | 类别内方差权重 | 0.02 |
+
+## 4. 解释性分析
+
+对应 `code/interpretation.py`，输出三类表：
+
+| 输出文件 | 内容 |
+|----------|------|
+| `source_contribution_summary.csv` | 各信息源的平均增益 |
+| `source_ablation.csv` | 融合模型中移除某信息源的损失 |
+| `feature_signals.csv` | 账号特征重要性与方向 |
+| `text_signals.csv` | TF-IDF 关键词权重与方向 |
+| `graph_signals.csv` | 图结构统计特征重要性 |
+
+## 5. 可视化
+
+对应 `code/visualization.py`，围绕三个研究问题输出图表：
+
+| 图表 | 对应问题 |
+|------|---------|
+| `information_effectiveness.png` | 问题一 |
+| `method_differences.png` | 问题二 |
+| `explainability_signals.png` | 问题三 |
+| `feature_signal_map.png` | 特征重要性与方向 |
+| `embedding_separation_map.png` | 嵌入空间类分布 |
+| `local_network_patterns.png` | 高置信样本的局部网络 |

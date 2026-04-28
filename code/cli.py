@@ -42,6 +42,7 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--node2vec-inout-q", type=float, default=2.0)
 
     parser.add_argument("--skip-gnn", action="store_true")
+    parser.add_argument("--only-tign", action="store_true", help="Run only the TIGN GNN model (requires --disable-transformer)")
     parser.add_argument("--gnn-hidden-dim", type=int, default=128)
     parser.add_argument("--gnn-epochs", type=int, default=50)
     parser.add_argument("--gnn-patience", type=int, default=10)
@@ -131,6 +132,9 @@ def main() -> None:
     if args.command == "prepare":
         prepare_dataset(config)
     elif args.command == "train":
+        import os as _os
+        if getattr(args, "only_tign", False):
+            _os.environ["ONLY_TIGN"] = "1"
         run_experiments(config)
     elif args.command == "visualize":
         generate_visualizations(config)

@@ -104,10 +104,10 @@ class FeatureTextGraphBotDGT(_FeatureTextGraphBase):
         structural_states: list[torch.Tensor] = []
         for snapshot_edges in snapshot_edge_indices:
             snapshot_edges = snapshot_edges.to(base_x.device)
-            structural = self.structural_layer1(base_x, snapshot_edges)
-            structural = self.dropout(F.leaky_relu(structural))
-            structural = self.structural_layer2(structural, snapshot_edges)
-            structural_states.append(F.leaky_relu(structural + base_x))
+            x = self.structural_layer1(base_x, snapshot_edges)
+            x = self.dropout(F.leaky_relu(x)) + base_x
+            x = self.structural_layer2(x, snapshot_edges)
+            structural_states.append(self.dropout(F.leaky_relu(x)) + base_x)
 
         temporal_inputs = torch.stack(structural_states, dim=1)
         cluster_signal = self.cluster_position_encoder(clustering.transpose(0, 1).to(base_x.device))
@@ -138,7 +138,7 @@ class FeatureTextGraphBotDGT(_FeatureTextGraphBase):
             feedforward = self.temporal_ff(temporal_output)
             temporal_output = self.temporal_norm2(feedforward + temporal_output)
 
-        x = self.output_mlp(temporal_output[:, -1, :])
+        x = self.output_mlp(temporal_output[:, -1, :] + base_x)
         logits = self.output_head(x)
 
         if temporal_output.shape[1] > 1:

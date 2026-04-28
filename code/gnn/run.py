@@ -187,6 +187,11 @@ def run_graph_neural_models(
             "TransformerConv is unavailable, skipping feature_text_graph_botsai, feature_text_graph_botdgt and feature_text_graph_tign."
         )
 
+    # Support --only-tign flag: only run the last model (TIGN)
+    import os as _os
+    if _os.environ.get("ONLY_TIGN") and len(model_specs) > 1:
+        model_specs = [model_specs[-1]]  # TIGN is always the last
+
     for name, model, edge_index, edge_type in model_specs:
         LOGGER.info("Running graph neural model: %s", name)
         outputs.append(
