@@ -93,10 +93,11 @@ class FeatureTextGraphBotSAI(_FeatureTextGraphBase):
         edge_attr = self.relation_embedding(bounded_edge_type)
 
         x = self.structural_layer1(fused, edge_index, edge_attr=edge_attr)
-        x = self.dropout(F.leaky_relu(x))
+        x = self.dropout(F.leaky_relu(x)) + fused
         x = self.structural_layer2(x, edge_index, edge_attr=edge_attr)
+        x = self.dropout(F.leaky_relu(x)) + fused
         x = self.output_mlp(x)
-        logits = self.output_head(x)
+        logits = self.output_head(x + fused)
 
         inv_stack = torch.stack(invariant_parts, dim=1)
         inv_center = inv_stack.mean(dim=1, keepdim=True)
