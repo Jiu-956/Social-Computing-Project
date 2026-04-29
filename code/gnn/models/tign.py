@@ -87,6 +87,14 @@ class FeatureTextGraphTIGN(_FeatureTextGraphBase):
             edge_dim=hidden_dim,
             dropout=dropout,
         )
+        self.structural_layer3 = TransformerConv(
+            hidden_dim,
+            hidden_dim // graph_heads,
+            heads=graph_heads,
+            concat=True,
+            edge_dim=hidden_dim,
+            dropout=dropout,
+        )
 
     def _build_edge_attr(self, edge_type: torch.Tensor) -> torch.Tensor:
         batch_size = edge_type.shape[0]
@@ -140,6 +148,8 @@ class FeatureTextGraphTIGN(_FeatureTextGraphBase):
         x = self.structural_layer1(fused, edge_index, edge_attr=edge_attr)
         x = self.dropout(F.leaky_relu(x)) + fused
         x = self.structural_layer2(x, edge_index, edge_attr=edge_attr)
+        x = self.dropout(F.leaky_relu(x)) + fused
+        x = self.structural_layer3(x, edge_index, edge_attr=edge_attr)
         x = self.output_mlp(x + fused)  # additional residual
         logits = self.output_head(x)
 

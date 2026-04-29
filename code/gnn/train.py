@@ -43,6 +43,19 @@ def _split_model_output(model_output: Any) -> tuple[torch.Tensor, torch.Tensor |
     return model_output, None
 
 
+def _find_best_threshold(y_true: np.ndarray, probabilities: np.ndarray, thresholds: np.ndarray) -> float:
+    best_f1 = -1.0
+    best_th = 0.5
+    for th in thresholds:
+        preds = (probabilities >= th).astype(int)
+        _, _, f1, _ = precision_recall_fscore_support(y_true, preds, average="binary", zero_division=0)
+        f1_val = float(f1)
+        if f1_val > best_f1:
+            best_f1 = f1_val
+            best_th = float(th)
+    return best_th
+
+
 def _compute_metrics(y_true: np.ndarray, y_pred: np.ndarray, probabilities: np.ndarray) -> dict[str, float]:
     precision, recall, f1, _ = precision_recall_fscore_support(y_true, y_pred, average="binary", zero_division=0)
     try:
@@ -125,21 +138,31 @@ def _train_gnn_model(
         raw_output = model(description_tensor, tweet_tensor, num_prop_tensor, cat_prop_tensor, edge_index, edge_type)
         logits, _ = _split_model_output(raw_output)
 
-    metrics_rows: list[dict[str, float | str]] = []
-    prediction_rows: list[dict[str, float | str | int]] = []
-    for split_name, indices in (("val", val_indices), ("test", test_indices)):
-        split_probs = torch.softmax(logits[indices], dim=1)[:, 1].cpu().numpy()
-        split_preds = (split_probs >= 0.5).astype(int)
-        split_true = labels[indices].cpu().numpy()
+    # Find best threshold on val, apply same threshold to test
+    search_thresholds = np.linspace(0.2, 0.8, 61)
+    val_probs = torch.softmax(logits[val_indices], dim=1)[:, 1].cpu().numpy()
+    val_true = labels[val_indices].cpu().numpy()
+    best_th = _find_best_threshold(val_true, val_probs, search_thresholds)
+    test_probs = torch.softmax(logits[test_indices], dim=1)[:, 1].cpu().numpy()
+    test_true = labels[test_indices].cpu().numpy()
+
+    metrics_rows = []
+    prediction_rows = []
+    for split_name, split_probs, split_true, split_indices in (
+        ("val", val_probs, val_true, val_indices),
+        ("test", test_probs, test_true, test_indices),
+    ):
+        split_preds = (split_probs >= best_th).astype(int)
         metrics_rows.append(
             {
                 "experiment": name,
                 "family": "feature_text_graph",
                 "split": split_name,
+                "best_threshold": float(best_th),
                 **_compute_metrics(split_true, split_preds, split_probs),
             }
         )
-        user_subset = users.iloc[indices.cpu().numpy()]
+        user_subset = users.iloc[split_indices.cpu().numpy()]
         for user_id, true_label, pred_label, probability in zip(
             user_subset["user_id"].tolist(),
             split_true.tolist(),
