@@ -138,13 +138,27 @@ def _train_gnn_model(
         raw_output = model(description_tensor, tweet_tensor, num_prop_tensor, cat_prop_tensor, edge_index, edge_type)
         logits, _ = _split_model_output(raw_output)
 
-    # Find best threshold on val, apply same threshold to test
+    # Search for better threshold on val, but only apply if it improves F1 by >0.005 vs 0.5
     search_thresholds = np.linspace(0.2, 0.8, 61)
     val_probs = torch.softmax(logits[val_indices], dim=1)[:, 1].cpu().numpy()
     val_true = labels[val_indices].cpu().numpy()
     best_th = _find_best_threshold(val_true, val_probs, search_thresholds)
     test_probs = torch.softmax(logits[test_indices], dim=1)[:, 1].cpu().numpy()
     test_true = labels[test_indices].cpu().numpy()
+
+    # Compute F1 at default 0.5 threshold vs best threshold on val
+    val_preds_default = (val_probs >= 0.5).astype(int)
+    _, _, val_f1_default, _ = precision_recall_fscore_support(val_true, val_preds_default, average="binary", zero_division=0)
+    val_f1_default = float(val_f1_default)
+    val_preds_best = (val_probs >= best_th).astype(int)
+    _, _, val_f1_best, _ = precision_recall_fscore_support(val_true, val_preds_best, average="binary", zero_division=0)
+    val_f1_best = float(val_f1_best)
+
+    # Only use the found threshold if it gives meaningful improvement
+    if val_f1_best - val_f1_default > 0.005:
+        use_th = best_th
+    else:
+        use_th = 0.5
 
     metrics_rows = []
     prediction_rows = []
@@ -158,7 +172,7 @@ def _train_gnn_model(
                 "experiment": name,
                 "family": "feature_text_graph",
                 "split": split_name,
-                "best_threshold": float(best_th),
+                "best_threshold": float(use_th),
                 **_compute_metrics(split_true, split_preds, split_probs),
             }
         )

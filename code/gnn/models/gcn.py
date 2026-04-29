@@ -33,9 +33,9 @@ class FeatureTextGraphGCN(_FeatureTextGraphBase):
         edge_index: torch.Tensor,
         edge_type: torch.Tensor | None = None,
     ) -> torch.Tensor:
-        x = self.encode_inputs(description, tweet, num_prop, cat_prop)
-        x = self.gcn1(x, edge_index)
-        x = self.dropout(x)
+        base_x = self.encode_inputs(description, tweet, num_prop, cat_prop)
+        x = self.gcn1(base_x, edge_index)
+        x = self.dropout(x) + base_x
         x = self.gcn2(x, edge_index)
-        x = self.output_mlp(x)
+        x = self.output_mlp(x + base_x)
         return self.output_head(x)

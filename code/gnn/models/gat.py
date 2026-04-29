@@ -37,5 +37,6 @@ class FeatureTextGraphGAT(_FeatureTextGraphBase):
         x = self.gat1(x, edge_index)
         x = self.dropout(x)
         x = self.gat2(x, edge_index)
-        x = self.output_mlp(x)
+        x = self.dropout(x) + base_x
+        x = self.output_mlp(x + base_x)
         return self.output_head(x)

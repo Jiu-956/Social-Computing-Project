@@ -36,9 +36,9 @@ class FeatureTextGraphBotRGCN(_FeatureTextGraphBase):
     ) -> torch.Tensor:
         if edge_type is None:
             raise ValueError("BotRGCN requires edge_type.")
-        x = self.encode_inputs(description, tweet, num_prop, cat_prop)
-        x = self.rgcn1(x, edge_index, edge_type)
-        x = self.dropout(x)
+        base_x = self.encode_inputs(description, tweet, num_prop, cat_prop)
+        x = self.rgcn1(base_x, edge_index, edge_type)
+        x = self.dropout(x) + base_x
         x = self.rgcn2(x, edge_index, edge_type)
-        x = self.output_mlp(x)
+        x = self.output_mlp(x + base_x)
         return self.output_head(x)
