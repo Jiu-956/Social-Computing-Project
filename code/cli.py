@@ -122,12 +122,12 @@ def main() -> None:
     parser = build_parser()
     args = parser.parse_args()
 
-    logging.basicConfig(
-        level=getattr(logging, str(args.log_level).upper(), logging.INFO),
-        format="%(asctime)s | %(levelname)s | %(name)s | %(message)s",
-    )
     config = make_config(args)
     config.ensure_directories()
+    log_level = getattr(logging, str(args.log_level).upper(), logging.INFO)
+    log_format = "%(asctime)s | %(levelname)s | %(name)s | %(message)s"
+    handlers = [logging.StreamHandler(), logging.FileHandler(config.logs_dir / f"{args.command}.log", encoding="utf-8")]
+    logging.basicConfig(level=log_level, format=log_format, handlers=handlers)
 
     if args.command == "prepare":
         prepare_dataset(config)

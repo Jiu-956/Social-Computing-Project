@@ -33,8 +33,8 @@ class FeatureTextGraphGAT(_FeatureTextGraphBase):
         edge_index: torch.Tensor,
         edge_type: torch.Tensor | None = None,
     ) -> torch.Tensor:
-        x = self.encode_inputs(description, tweet, num_prop, cat_prop)
-        x = self.gat1(x, edge_index)
+        base_x = self.encode_inputs(description, tweet, num_prop, cat_prop)
+        x = self.gat1(base_x, edge_index)
         x = self.dropout(x)
         x = self.gat2(x, edge_index)
         x = self.dropout(x) + base_x

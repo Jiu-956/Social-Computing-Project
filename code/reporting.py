@@ -142,6 +142,7 @@ def generate_report(config: ProjectConfig) -> Path:
         [
             "",
             "## 5. 关键可视化输出",
+            "- `artifacts/figures/training_curves.png`：展示 GNN 训练过程中的 loss 与 F1 变化。",
             "- `artifacts/figures/information_effectiveness.png`：回答“哪类信息更有效”。",
             "- `artifacts/figures/explainability_signals.png`：给出账号属性、文本表达、图结构三类解释信号的总览。",
             "- `artifacts/figures/feature_signal_map.png`：展示关键结构化特征的重要性及其机器人 / 人类方向差异。",

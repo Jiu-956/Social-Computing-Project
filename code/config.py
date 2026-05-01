@@ -52,8 +52,8 @@ class ProjectConfig:
     gnn_hidden_dim: int = 128
     gnn_epochs: int = 50
     gnn_patience: int = 10
-    gnn_learning_rate: float = 1e-2
-    gnn_weight_decay: float = 5e-2
+    gnn_learning_rate: float = 1e-3
+    gnn_weight_decay: float = 5e-4
     gnn_dropout: float = 0.1
     botsai_invariant_weight: float = 0.05
     botsai_attention_heads: int = 4
@@ -70,6 +70,7 @@ class ProjectConfig:
     random_state: int = 42
 
     cache_dir: Path = field(init=False)
+    logs_dir: Path = field(init=False)
     models_dir: Path = field(init=False)
     tables_dir: Path = field(init=False)
     figures_dir: Path = field(init=False)
@@ -78,12 +79,13 @@ class ProjectConfig:
         self.data_dir = resolve_data_dir(Path(self.data_dir))
         self.output_dir = Path(self.output_dir)
         self.cache_dir = self.output_dir / "cache"
+        self.logs_dir = self.output_dir / "logs"
         self.models_dir = self.output_dir / "models"
         self.tables_dir = self.output_dir / "tables"
         self.figures_dir = self.output_dir / "figures"
 
     def ensure_directories(self) -> None:
-        for path in (self.output_dir, self.cache_dir, self.models_dir, self.tables_dir, self.figures_dir):
+        for path in (self.output_dir, self.cache_dir, self.logs_dir, self.models_dir, self.tables_dir, self.figures_dir):
             path.mkdir(parents=True, exist_ok=True)
 
 

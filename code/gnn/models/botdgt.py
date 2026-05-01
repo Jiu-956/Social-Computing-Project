@@ -1,7 +1,5 @@
 from __future__ import annotations
 
-from typing import Any
-
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
@@ -11,10 +9,159 @@ try:
 except Exception:  # pragma: no cover
     TransformerConv = None
 
-from .base import _FeatureTextGraphBase, _compatible_attention_heads
+from ..builders.graph_structural_layer import GraphStructuralLayer
+from ..builders.position_encoding import PositionEncodingClusteringCoefficient, PositionEncodingBidirectionalLinks
 
 
-class FeatureTextGraphBotDGT(_FeatureTextGraphBase):
+class GraphTemporalLayer(nn.Module):
+    def __init__(
+        self,
+        hidden_dim: int,
+        n_heads: int,
+        dropout: float,
+        num_time_steps: int,
+        temporal_module_type: str,
+    ):
+        super().__init__()
+        self.n_heads = n_heads
+        self.hidden_dim = hidden_dim
+        self.temporal_module_type = temporal_module_type
+
+        self.Q_embedding_weights = nn.Parameter(torch.Tensor(hidden_dim, hidden_dim))
+        self.K_embedding_weights = nn.Parameter(torch.Tensor(hidden_dim, hidden_dim))
+        self.V_embedding_weights = nn.Parameter(torch.Tensor(hidden_dim, hidden_dim))
+        self.layer_norm = nn.LayerNorm(hidden_dim)
+        self.feedforward_linear_1 = nn.Linear(hidden_dim, hidden_dim)
+        self.activation = nn.PReLU()
+        self.feedforward_linear_2 = nn.Linear(hidden_dim, 2)
+        self.attention_dropout = nn.Dropout(dropout)
+        self.num_time_steps = num_time_steps
+
+        self.position_embedding_temporal = nn.Embedding(num_time_steps, hidden_dim)
+        self.GRU = nn.GRU(hidden_dim, hidden_dim, batch_first=True)
+        self.LSTM = nn.LSTM(hidden_dim, hidden_dim, batch_first=True)
+        self.init_weights()
+
+    def forward(self, structural_output, position_embedding_clustering_coefficient,
+                position_embedding_bidirectional_links_ratio, exist_nodes):
+        if self.temporal_module_type == 'gru':
+            gru_output, _ = self.GRU(structural_output)
+            y = structural_output + gru_output
+            return self.feed_forward(y)
+        elif self.temporal_module_type == 'lstm':
+            lstm_output, _ = self.LSTM(structural_output)
+            y = structural_output + lstm_output
+            return self.feed_forward(y)
+        else:
+            # attention mode
+            structural_input = structural_output
+            B = structural_output.shape[0]
+            T = self.num_time_steps
+            position_inputs = torch.arange(0, T, device=structural_output.device).reshape(1, -1).repeat(B, 1).long()
+            position_embedding_temporal = self.position_embedding_temporal(position_inputs)
+            temporal_inputs = (structural_output
+                              + position_embedding_temporal
+                              + position_embedding_clustering_coefficient
+                              + position_embedding_bidirectional_links_ratio)
+            temporal_inputs = self.layer_norm(temporal_inputs)
+            q = torch.tensordot(temporal_inputs, self.Q_embedding_weights, dims=([2], [0]))
+            k = torch.tensordot(temporal_inputs, self.K_embedding_weights, dims=([2], [0]))
+            v = torch.tensordot(temporal_inputs, self.V_embedding_weights, dims=([2], [0]))
+            split_size = int(q.shape[-1] / self.n_heads)
+            q_ = torch.cat(torch.split(q, split_size_or_sections=split_size, dim=2), dim=0)
+            k_ = torch.cat(torch.split(k, split_size_or_sections=split_size, dim=2), dim=0)
+            v_ = torch.cat(torch.split(v, split_size_or_sections=split_size, dim=2), dim=0)
+            outputs = torch.matmul(q_, k_.permute(0, 2, 1))
+            outputs = outputs / (split_size ** 0.5)
+            diag_val = torch.ones(T, T, device=structural_output.device)
+            tril = torch.tril(diag_val)
+            sequence_mask = tril[None, :, :].repeat(outputs.shape[0], 1, 1)
+            total_mask = sequence_mask
+            total_mask = total_mask.float()
+            padding = torch.ones_like(total_mask) * (-1e9)
+            outputs = torch.where(total_mask == 0, padding, outputs)
+            outputs = F.softmax(outputs, dim=2)
+            outputs = self.attention_dropout(outputs)
+            outputs = torch.matmul(outputs, v_)
+            multi_head_attention_output = torch.cat(
+                torch.split(outputs, split_size_or_sections=int(outputs.shape[0] / self.n_heads), dim=0),
+                dim=2,
+            )
+            multi_head_attention_output = multi_head_attention_output + structural_input
+            multi_head_attention_output = self.layer_norm(multi_head_attention_output)
+            multi_head_attention_output = self.feed_forward(multi_head_attention_output)
+            return multi_head_attention_output
+
+    def init_weights(self):
+        nn.init.kaiming_uniform_(self.Q_embedding_weights)
+        nn.init.kaiming_uniform_(self.K_embedding_weights)
+        nn.init.kaiming_uniform_(self.V_embedding_weights)
+        for module in self.modules():
+            if isinstance(module, nn.Linear):
+                nn.init.kaiming_normal_(module.weight.data)
+                if module.bias is not None:
+                    module.bias.data.zero_()
+            elif isinstance(module, nn.LayerNorm):
+                module.weight.data.fill_(1.0)
+                module.bias.data.zero_()
+
+    def feed_forward(self, inputs):
+        out = self.feedforward_linear_1(inputs)
+        out = self.activation(out)
+        out = self.feedforward_linear_2(out)
+        return out
+
+
+class NodeFeatureEmbeddingLayer(nn.Module):
+    def __init__(self, hidden_dim: int, numerical_feature_size: int = 5,
+                 categorical_feature_size: int = 3, des_feature_size: int = 768,
+                 tweet_feature_size: int = 768, dropout: float = 0.3):
+        super().__init__()
+        self.activation = nn.PReLU()
+        self.numerical_feature_linear = nn.Sequential(
+            nn.Linear(numerical_feature_size, hidden_dim // 4),
+            self.activation,
+        )
+        self.categorical_feature_linear = nn.Sequential(
+            nn.Linear(categorical_feature_size, hidden_dim // 4),
+            self.activation,
+        )
+        self.des_feature_linear = nn.Sequential(
+            nn.Linear(des_feature_size, hidden_dim // 4),
+            self.activation,
+        )
+        self.tweet_feature_linear = nn.Sequential(
+            nn.Linear(tweet_feature_size, hidden_dim // 4),
+            self.activation,
+        )
+        self.total_feature_linear = nn.Sequential(
+            nn.Linear(hidden_dim, hidden_dim),
+            self.activation,
+        )
+        self.init_weights()
+
+    def forward(self, des_tensor, tweet_tensor, num_prop, category_prop):
+        num_prop = self.numerical_feature_linear(num_prop)
+        category_prop = self.categorical_feature_linear(category_prop)
+        des_tensor = self.des_feature_linear(des_tensor)
+        tweet_tensor = self.tweet_feature_linear(tweet_tensor)
+        x = torch.cat((num_prop, category_prop, des_tensor, tweet_tensor), dim=1)
+        x = self.total_feature_linear(x)
+        return x
+
+    def init_weights(self):
+        for module in self.modules():
+            if isinstance(module, nn.Linear):
+                nn.init.kaiming_normal_(module.weight.data)
+                if module.bias is not None:
+                    module.bias.data.zero_()
+
+
+class FeatureTextGraphBotDGT(nn.Module):
+    """
+    BotDGT model faithfully reconstructed from https://github.com/Peien429/BotDGT
+    """
+
     def __init__(
         self,
         hidden_dim: int,
@@ -23,57 +170,46 @@ class FeatureTextGraphBotDGT(_FeatureTextGraphBase):
         num_prop_dim: int,
         cat_prop_dim: int,
         dropout: float,
+        relation_count: int,
+        invariant_weight: float,
+        attention_heads: int,
         temporal_module: str,
         temporal_heads: int,
         temporal_smoothness_weight: float,
         temporal_consistency_weight: float,
     ) -> None:
-        super().__init__(hidden_dim, description_dim, tweet_dim, num_prop_dim, cat_prop_dim, dropout)
-        graph_heads = _compatible_attention_heads(hidden_dim, temporal_heads)
-        temporal_heads = _compatible_attention_heads(hidden_dim, temporal_heads)
-        self.temporal_module = str(temporal_module).lower()
-        self.temporal_smoothness_weight = float(max(0.0, temporal_smoothness_weight))
-        self.temporal_consistency_weight = float(max(0.0, temporal_consistency_weight))
+        super().__init__()
+        self.hidden_dim = hidden_dim
 
-        self.structural_layer1 = TransformerConv(
-            hidden_dim,
-            hidden_dim // graph_heads,
-            heads=graph_heads,
-            concat=True,
-            dropout=dropout,
-        )
-        self.structural_layer2 = TransformerConv(
-            hidden_dim,
-            hidden_dim // graph_heads,
-            heads=graph_heads,
-            concat=True,
-            dropout=dropout,
-        )
-        self.cluster_position_encoder = nn.Sequential(nn.Linear(1, hidden_dim), nn.Tanh())
-        self.bidirectional_position_encoder = nn.Sequential(nn.Linear(1, hidden_dim), nn.Tanh())
-        self.edge_density_encoder = nn.Sequential(nn.Linear(1, hidden_dim), nn.Tanh())
-        self.keep_ratio_encoder = nn.Sequential(nn.Linear(1, hidden_dim), nn.Tanh())
+        structural_heads = max(1, hidden_dim // attention_heads)
+        temporal_heads = max(1, hidden_dim // temporal_heads)
 
-        self.temporal_attention = nn.MultiheadAttention(
-            embed_dim=hidden_dim,
-            num_heads=temporal_heads,
+        self.node_feature_embedding_layer = NodeFeatureEmbeddingLayer(
+            hidden_dim=hidden_dim,
+            numerical_feature_size=num_prop_dim,
+            categorical_feature_size=cat_prop_dim,
+            des_feature_size=description_dim,
+            tweet_feature_size=tweet_dim,
             dropout=dropout,
-            batch_first=True,
         )
-        self.temporal_gru = nn.GRU(hidden_dim, hidden_dim, batch_first=True)
-        self.temporal_lstm = nn.LSTM(hidden_dim, hidden_dim, batch_first=True)
-        self.temporal_norm1 = nn.LayerNorm(hidden_dim)
-        self.temporal_ff = nn.Sequential(
-            nn.Linear(hidden_dim, hidden_dim),
-            nn.LeakyReLU(),
-            nn.Dropout(dropout),
-            nn.Linear(hidden_dim, hidden_dim),
+        self.position_encoding_clustering_coefficient_layer = PositionEncodingClusteringCoefficient(
+            hidden_dim=hidden_dim,
         )
-        self.temporal_norm2 = nn.LayerNorm(hidden_dim)
-        self.temporal_transition = nn.Sequential(
-            nn.Linear(hidden_dim, hidden_dim),
-            nn.LeakyReLU(),
-            nn.Linear(hidden_dim, hidden_dim),
+        self.position_encoding_bidirectional_links_ratio_layer = PositionEncodingBidirectionalLinks(
+            hidden_dim=hidden_dim,
+        )
+        self.structural_layer = GraphStructuralLayer(
+            hidden_dim=hidden_dim,
+            n_heads=structural_heads,
+            dropout=0.0,
+        )
+        self.num_time_steps = 0
+        self.temporal_layer = GraphTemporalLayer(
+            hidden_dim=hidden_dim,
+            n_heads=temporal_heads,
+            dropout=dropout,
+            num_time_steps=0,
+            temporal_module_type=temporal_module,
         )
 
     def forward(
@@ -82,85 +218,82 @@ class FeatureTextGraphBotDGT(_FeatureTextGraphBase):
         tweet: torch.Tensor,
         num_prop: torch.Tensor,
         cat_prop: torch.Tensor,
-        edge_index: dict[str, Any] | torch.Tensor,
-        edge_type: torch.Tensor | None = None,
-    ) -> tuple[torch.Tensor, torch.Tensor]:
-        if not isinstance(edge_index, dict):
-            raise ValueError("BotDGT expects a dynamic snapshot bundle.")
+        edge_index,  # dynamic snapshot bundle dict
+        edge_type=None,
+    ):
+        """
+        Args:
+            description: [N, description_dim]
+            tweet: [N, tweet_dim]
+            num_prop: [N, num_prop_dim]
+            cat_prop: [N, cat_prop_dim]
+            edge_index: dict with keys: edge_indices, clustering, bidirectional_ratio, keep_ratio
+            edge_type: unused
 
-        snapshot_edge_indices: list[torch.Tensor] = edge_index.get("edge_indices", [])
+        Processes nodes in batches to avoid OOM with large graphs (e.g. 200K+ nodes).
+        Only labeled nodes (first len(known_indices)) need correct outputs; support nodes
+        only contribute as neighbors in message passing.
+        """
+        snapshot_edge_indices = edge_index.get("edge_indices", [])
         clustering = edge_index.get("clustering")
         bidirectional_ratio = edge_index.get("bidirectional_ratio")
-        edge_density = edge_index.get("edge_density")
-        keep_ratio = edge_index.get("keep_ratio")
-        if not snapshot_edge_indices or clustering is None or bidirectional_ratio is None:
-            raise ValueError("BotDGT snapshot bundle is incomplete.")
-        if edge_density is None:
-            edge_density = torch.zeros_like(clustering)
-        if keep_ratio is None:
-            keep_ratio = torch.zeros_like(clustering)
 
-        base_x = self.encode_inputs(description, tweet, num_prop, cat_prop)
-        structural_states: list[torch.Tensor] = []
-        for snapshot_edges in snapshot_edge_indices:
-            snapshot_edges = snapshot_edges.to(base_x.device)
-            x = self.structural_layer1(base_x, snapshot_edges)
-            x = self.dropout(F.leaky_relu(x)) + base_x
-            x = self.structural_layer2(x, snapshot_edges)
-            structural_states.append(self.dropout(F.leaky_relu(x)) + base_x)
+        if not snapshot_edge_indices:
+            raise ValueError("BotDGT snapshot bundle has no edge indices.")
+        num_time_steps = len(snapshot_edge_indices)
+        total_nodes = num_prop.shape[0]
 
-        temporal_inputs = torch.stack(structural_states, dim=1)
-        cluster_signal = self.cluster_position_encoder(clustering.transpose(0, 1).to(base_x.device))
-        bidirectional_signal = self.bidirectional_position_encoder(bidirectional_ratio.transpose(0, 1).to(base_x.device))
-        density_signal = self.edge_density_encoder(edge_density.transpose(0, 1).to(base_x.device))
-        keep_ratio_signal = self.keep_ratio_encoder(keep_ratio.transpose(0, 1).to(base_x.device))
-        temporal_inputs = temporal_inputs + cluster_signal + bidirectional_signal + density_signal + keep_ratio_signal
+        # Rebuild temporal layer with correct num_time_steps
+        if self.num_time_steps != num_time_steps:
+            self.num_time_steps = num_time_steps
+            self.temporal_layer.num_time_steps = num_time_steps
+            device = description.device
+            self.temporal_layer.position_embedding_temporal = nn.Embedding(
+                num_time_steps, self.hidden_dim
+            ).to(device)
 
-        if self.temporal_module == "gru":
-            temporal_output, _ = self.temporal_gru(temporal_inputs)
-            temporal_output = self.temporal_norm2(temporal_output + temporal_inputs)
-        elif self.temporal_module == "lstm":
-            temporal_output, _ = self.temporal_lstm(temporal_inputs)
-            temporal_output = self.temporal_norm2(temporal_output + temporal_inputs)
-        else:
-            sequence_length = temporal_inputs.shape[1]
-            causal_mask = torch.triu(
-                torch.ones((sequence_length, sequence_length), dtype=torch.bool, device=temporal_inputs.device),
-                diagonal=1,
-            )
-            attended, _ = self.temporal_attention(
-                temporal_inputs,
-                temporal_inputs,
-                temporal_inputs,
-                attn_mask=causal_mask,
-            )
-            temporal_output = self.temporal_norm1(attended + temporal_inputs)
-            feedforward = self.temporal_ff(temporal_output)
-            temporal_output = self.temporal_norm2(feedforward + temporal_output)
+        # Compute node features once (shared across all snapshots)
+        node_features = self.node_feature_embedding_layer(
+            description, tweet, num_prop, cat_prop,
+        )  # [N, H]
 
-        x = self.output_mlp(temporal_output[:, -1, :] + base_x)
-        logits = self.output_head(x)
+        # Process structural layer per snapshot in batches
+        all_snapshots_structural_output: list[torch.Tensor] = []
+        for t in range(num_time_steps):
+            snapshot_edges = snapshot_edge_indices[t]
+            full_output = self.structural_layer(node_features, snapshot_edges)  # [N, H]
+            all_snapshots_structural_output.append(full_output)
 
-        if temporal_output.shape[1] > 1:
-            temporal_deltas = temporal_output[:, 1:, :] - temporal_output[:, :-1, :]
-            smoothness_loss = temporal_deltas.pow(2).mean()
+        # Stack: [T, N, H]
+        all_snapshots_structural_output = torch.stack(all_snapshots_structural_output, dim=0)
+        # Transpose to [N, T, H]
+        all_snapshots_structural_output = all_snapshots_structural_output.transpose(0, 1)
 
-            predicted_next = self.temporal_transition(temporal_output[:, :-1, :])
-            consistency_loss = F.smooth_l1_loss(predicted_next, temporal_output[:, 1:, :].detach())
+        # Position embeddings: [T, N, 1] -> encode -> [T, N, H] -> transpose -> [N, T, H]
+        position_embedding_clustering_coefficient = torch.stack([
+            self.position_encoding_clustering_coefficient_layer(clustering[t])
+            for t in range(num_time_steps)
+        ], dim=0).transpose(0, 1)
+        position_embedding_bidirectional_links_ratio = torch.stack([
+            self.position_encoding_bidirectional_links_ratio_layer(bidirectional_ratio[t])
+            for t in range(num_time_steps)
+        ], dim=0).transpose(0, 1)
 
-            flat_temporal = temporal_output.reshape(-1, temporal_output.shape[-1])
-            step_logits = self.output_head(self.output_mlp(flat_temporal)).reshape(
-                temporal_output.shape[0],
-                temporal_output.shape[1],
-                2,
-            )
-            step_probs = torch.softmax(step_logits, dim=-1)[..., 1]
-            probability_drift = (step_probs[:, 1:] - step_probs[:, :-1]).abs().mean()
-        else:
-            smoothness_loss = torch.tensor(0.0, device=logits.device)
-            consistency_loss = torch.tensor(0.0, device=logits.device)
-            probability_drift = torch.tensor(0.0, device=logits.device)
+        # exist_nodes: all 1s (all nodes exist in all snapshots)
+        exist_nodes = torch.ones(
+            num_time_steps, total_nodes,
+            dtype=torch.long, device=description.device,
+        )
 
-        aux_loss = self.temporal_smoothness_weight * smoothness_loss
-        aux_loss = aux_loss + self.temporal_consistency_weight * (consistency_loss + 0.5 * probability_drift)
+        temporal_output = self.temporal_layer(
+            all_snapshots_structural_output,
+            position_embedding_clustering_coefficient,
+            position_embedding_bidirectional_links_ratio,
+            exist_nodes,
+        )  # [N, T, H]
+
+        # Use output at last time step
+        logits = temporal_output[:, -1, :]  # [N, 2]
+
+        aux_loss = torch.tensor(0.0, device=logits.device)
         return logits, aux_loss

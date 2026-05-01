@@ -232,6 +232,7 @@ def _validate_raw_data_files(config: ProjectConfig) -> None:
 def _sample_graph_users(users: pd.DataFrame, max_graph_users: int, seed: int) -> pd.DataFrame:
     labeled = users[users["label"].notna()].copy()
     support = users[users["label"].isna()].copy()
+    # Always keep all labeled users; only sample support set if needed
     if len(labeled) >= max_graph_users:
         return labeled.sample(n=max_graph_users, random_state=seed).copy()
     remaining = max_graph_users - len(labeled)

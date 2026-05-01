@@ -120,12 +120,34 @@ def run_graph_neural_models(
     ]
 
     if TRANSFORMER_CONV_AVAILABLE:
+        labeled_user_ids = set(users.loc[users["label_id"] >= 0, "user_id"])
+        botdgt_users = users[users["user_id"].isin(labeled_user_ids)].copy()
+        botdgt_id_to_index = {uid: i for i, uid in enumerate(botdgt_users["user_id"])}
         dynamic_bundle = _build_botdgt_snapshot_bundle(
-            users=users,
+            users=botdgt_users,
             graph_edges=graph_edges,
-            id_to_index=id_to_index,
+            id_to_index=botdgt_id_to_index,
             snapshot_count=config.botdgt_snapshot_count,
             min_keep_ratio=config.botdgt_min_keep_ratio,
+        )
+        # Tensors for BotDGT: only labeled nodes
+        botdgt_description = description_tensor[list(botdgt_users.index)]
+        botdgt_tweet = tweet_tensor[list(botdgt_users.index)]
+        botdgt_num_prop = num_prop_tensor[list(botdgt_users.index)]
+        botdgt_cat_prop = cat_prop_tensor[list(botdgt_users.index)]
+        botdgt_labels = labels[list(botdgt_users.index)]
+        # global indices within labeled set
+        botdgt_train = torch.tensor(
+            [i for i, split in enumerate(botdgt_users["split"]) if split == "train" and botdgt_users["label_id"].iloc[i] >= 0],
+            dtype=torch.long,
+        )
+        botdgt_val = torch.tensor(
+            [i for i, split in enumerate(botdgt_users["split"]) if split == "val" and botdgt_users["label_id"].iloc[i] >= 0],
+            dtype=torch.long,
+        )
+        botdgt_test = torch.tensor(
+            [i for i, split in enumerate(botdgt_users["split"]) if split == "test" and botdgt_users["label_id"].iloc[i] >= 0],
+            dtype=torch.long,
         )
         model_specs.extend(
             [
@@ -154,6 +176,9 @@ def run_graph_neural_models(
                         num_prop_dim=num_prop_tensor.shape[1],
                         cat_prop_dim=cat_prop_tensor.shape[1],
                         dropout=config.gnn_dropout,
+                        relation_count=2,
+                        invariant_weight=config.botsai_invariant_weight,
+                        attention_heads=config.botsai_attention_heads,
                         temporal_module=config.botdgt_temporal_module,
                         temporal_heads=config.botdgt_temporal_heads,
                         temporal_smoothness_weight=config.botdgt_temporal_smoothness_weight,
@@ -194,6 +219,29 @@ def run_graph_neural_models(
 
     for name, model, edge_index, edge_type in model_specs:
         LOGGER.info("Running graph neural model: %s", name)
+
+        if name == "feature_text_graph_botdgt":
+            # BotDGT uses only labeled nodes for subgraph
+            outputs.append(
+                _train_gnn_model(
+                    config=config,
+                    name=name,
+                    users=botdgt_users,
+                    model=model,
+                    description_tensor=botdgt_description,
+                    tweet_tensor=botdgt_tweet,
+                    num_prop_tensor=botdgt_num_prop,
+                    cat_prop_tensor=botdgt_cat_prop,
+                    labels=botdgt_labels,
+                    train_indices=botdgt_train,
+                    val_indices=botdgt_val,
+                    test_indices=botdgt_test,
+                    edge_index=edge_index,
+                    edge_type=edge_type,
+                )
+            )
+            continue
+
         outputs.append(
             _train_gnn_model(
                 config=config,

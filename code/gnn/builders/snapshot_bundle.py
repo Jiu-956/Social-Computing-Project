@@ -25,27 +25,16 @@ def _build_botdgt_snapshot_bundle(
     quantiles = np.clip(1.0 - keep_ratios, 0.0, 1.0)
     thresholds = [float(np.quantile(account_age, quantile)) for quantile in quantiles]
 
-    source_indices: list[int] = []
-    target_indices: list[int] = []
-    for row in graph_edges.itertuples(index=False):
-        source = id_to_index.get(row.source_id)
-        target = id_to_index.get(row.target_id)
-        if source is None or target is None:
-            continue
-        source_indices.append(source)
-        target_indices.append(target)
-
-    if not source_indices:
-        return {
-            "edge_indices": [torch.empty((2, 0), dtype=torch.long) for _ in range(snapshot_count)],
-            "clustering": torch.zeros((snapshot_count, node_count, 1), dtype=torch.float32),
-            "bidirectional_ratio": torch.zeros((snapshot_count, node_count, 1), dtype=torch.float32),
-            "edge_density": torch.zeros((snapshot_count, node_count, 1), dtype=torch.float32),
-            "keep_ratio": torch.tensor(keep_ratios, dtype=torch.float32).view(snapshot_count, 1, 1).repeat(1, node_count, 1),
-        }
-
-    source_array = np.asarray(source_indices, dtype=np.int64)
-    target_array = np.asarray(target_indices, dtype=np.int64)
+    # Vectorized edge building: extract all source/target arrays at once
+    if len(graph_edges) > 0:
+        all_sources = graph_edges["source_id"].map(id_to_index).values
+        all_targets = graph_edges["target_id"].map(id_to_index).values
+        valid_mask = pd.notna(all_sources) & pd.notna(all_targets)
+        source_array = np.asarray(all_sources[valid_mask], dtype=np.int64)
+        target_array = np.asarray(all_targets[valid_mask], dtype=np.int64)
+    else:
+        source_array = np.array([], dtype=np.int64)
+        target_array = np.array([], dtype=np.int64)
 
     edge_indices: list[torch.Tensor] = []
     clustering_list: list[torch.Tensor] = []
@@ -79,12 +68,25 @@ def _build_botdgt_snapshot_bundle(
         clustering_proxy = (undirected_degree / max_degree).reshape(-1, 1)
         clustering_list.append(torch.tensor(clustering_proxy, dtype=torch.float32))
 
+        # O(n log n) bidirectional ratio: for each node, count outgoing edges with a reverse edge
         out_degree = np.bincount(snapshot_source, minlength=node_count).astype(np.float32)
-        reciprocal = np.zeros((node_count,), dtype=np.float32)
-        directed_edges = set(zip(snapshot_source.tolist(), snapshot_target.tolist()))
-        for source, target in directed_edges:
-            if (target, source) in directed_edges:
-                reciprocal[source] += 1.0
+        # Fully vectorized bidirectional ratio: O(n log n) via sorted search
+        reciprocal = np.zeros(node_count, dtype=np.float32)
+        if snapshot_source.size > 0:
+            N = node_count
+            forward_keys = snapshot_source * N + snapshot_target
+            reverse_keys = snapshot_target * N + snapshot_source
+            uf, uf_idx = np.unique(forward_keys, return_index=True)
+            ur = np.unique(reverse_keys)
+            # Sort ur, then binary-search each uf key
+            ur_sorted = np.sort(ur)
+            # np.searchsorted returns insertion positions; check if key equals neighbor at that position
+            pos = np.searchsorted(ur_sorted, uf)
+            pos = np.clip(pos, 0, ur_sorted.size - 1)
+            matches = ur_sorted[pos] == uf
+            src_nodes = uf[matches] // N
+            np.add.at(reciprocal, src_nodes, 1)
+
         with np.errstate(divide="ignore", invalid="ignore"):
             ratio = np.divide(reciprocal, out_degree, out=np.zeros_like(reciprocal), where=out_degree > 0)
         bidirectional_list.append(torch.tensor(ratio.reshape(-1, 1), dtype=torch.float32))

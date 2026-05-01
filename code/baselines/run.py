@@ -72,6 +72,7 @@ def run_experiments(config: ProjectConfig) -> dict[str, Any]:
 
     metrics_rows: list[dict[str, Any]] = []
     prediction_frames: list[pd.DataFrame] = []
+    training_history_frames: list[pd.DataFrame] = []
     best_experiment = ""
     best_val_f1 = -1.0
 
@@ -84,9 +85,21 @@ def run_experiments(config: ProjectConfig) -> dict[str, Any]:
         result = _run_sklearn_experiment(config, spec, merged_labeled)
         metrics_rows.extend(result["metrics_rows"])
         prediction_frames.append(result["predictions"])
+        LOGGER.info(
+            "[%s] val_f1=%.4f test_f1=%.4f val_auc=%.4f test_auc=%.4f",
+            spec.name,
+            result["val_metrics"]["f1"],
+            result["test_metrics"]["f1"],
+            result["val_metrics"]["auc_roc"],
+            result["test_metrics"]["auc_roc"],
+        )
         if result["best_val_f1"] > best_val_f1:
             best_val_f1 = float(result["best_val_f1"])
             best_experiment = spec.name
+
+        training_history = result.get("training_history")
+        if isinstance(training_history, pd.DataFrame) and not training_history.empty:
+            training_history_frames.append(training_history)
 
     if config.run_gnn:
         gnn_users = users.merge(description_dense, on="user_id", how="left").merge(tweet_dense, on="user_id", how="left")
@@ -105,6 +118,8 @@ def run_experiments(config: ProjectConfig) -> dict[str, Any]:
         ):
             metrics_rows.extend(output.metrics_rows)
             prediction_frames.append(output.predictions)
+            if not output.training_history.empty:
+                training_history_frames.append(output.training_history)
             if output.best_val_f1 > best_val_f1:
                 best_val_f1 = output.best_val_f1
                 best_experiment = output.artifact_path.stem
@@ -117,8 +132,11 @@ def run_experiments(config: ProjectConfig) -> dict[str, Any]:
     metrics_df.to_csv(config.tables_dir / "experiment_metrics.csv", index=False)
     predictions_df.to_csv(config.tables_dir / "experiment_predictions.csv", index=False)
     family_summary.to_csv(config.tables_dir / "family_summary.csv", index=False)
+    if training_history_frames:
+        pd.concat(training_history_frames, ignore_index=True).to_csv(config.tables_dir / "training_history.csv", index=False)
     with (config.models_dir / "best_experiment.json").open("w", encoding="utf-8") as handle:
         json.dump({"best_experiment": best_experiment, "best_val_f1": best_val_f1}, handle, ensure_ascii=False, indent=2)
+    LOGGER.info("Best experiment: %s (val_f1=%.4f)", best_experiment, best_val_f1)
     return {
         "metrics": metrics_df,
         "predictions": predictions_df,
@@ -197,6 +215,8 @@ def _run_sklearn_experiment(config: ProjectConfig, spec: ExperimentSpec, dataset
         {"experiment": spec.name, "family": spec.family, "split": "val", **_compute_metrics(y_val, val_pred, val_prob)},
         {"experiment": spec.name, "family": spec.family, "split": "test", **_compute_metrics(y_test, test_pred, test_prob)},
     ]
+    val_metrics = _compute_metrics(y_val, val_pred, val_prob)
+    test_metrics = _compute_metrics(y_test, test_pred, test_prob)
 
     predictions = pd.concat(
         [
@@ -218,7 +238,13 @@ def _run_sklearn_experiment(config: ProjectConfig, spec: ExperimentSpec, dataset
         "text_column": spec.text_column,
     }
     joblib.dump(artifact, config.models_dir / f"{spec.name}.joblib")
-    return {"metrics_rows": metrics_rows, "predictions": predictions, "best_val_f1": metrics_rows[0]["f1"]}
+    return {
+        "metrics_rows": metrics_rows,
+        "predictions": predictions,
+        "best_val_f1": val_metrics["f1"],
+        "val_metrics": val_metrics,
+        "test_metrics": test_metrics,
+    }
 
 
 def _predict_with_probabilities(model: Any, matrix: Any) -> tuple[np.ndarray, np.ndarray]:

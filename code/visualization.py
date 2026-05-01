@@ -69,6 +69,10 @@ def generate_visualizations(config: ProjectConfig) -> None:
 
     metrics = pd.read_csv(metrics_path, low_memory=False)
     users = pd.read_csv(config.cache_dir / "users.csv", low_memory=False)
+    training_history_path = config.tables_dir / "training_history.csv"
+    if training_history_path.exists():
+        training_history = pd.read_csv(training_history_path, low_memory=False)
+        _plot_training_history(training_history, config)
     analysis_tables = ensure_information_source_analysis(config, metrics)
     signal_tables = ensure_explainability_signal_analysis(config)
 
@@ -92,6 +96,56 @@ def _plot_model_comparison(metrics: pd.DataFrame, config: ProjectConfig) -> None
     plt.tight_layout()
     plt.savefig(config.figures_dir / "model_comparison.png", dpi=200)
     plt.close()
+
+
+def _plot_training_history(history: pd.DataFrame, config: ProjectConfig) -> None:
+    if history.empty or "experiment" not in history.columns:
+        return
+
+    experiments = [experiment for experiment in history["experiment"].dropna().astype(str).unique().tolist()]
+    if not experiments:
+        return
+
+    ncols = 2
+    nrows = int(np.ceil(len(experiments) / ncols))
+    figure, axes = plt.subplots(nrows, ncols, figsize=(14, 4.8 * nrows), squeeze=False)
+
+    for index, experiment in enumerate(experiments):
+        row = index // ncols
+        col = index % ncols
+        axis = axes[row][col]
+        subset = history[history["experiment"] == experiment].sort_values("epoch")
+        if subset.empty:
+            axis.axis("off")
+            continue
+
+        loss_axis = axis
+        f1_axis = axis.twinx()
+        loss_axis.plot(subset["epoch"], subset["train_loss"], label="train loss", color="#4472c4", linewidth=1.6)
+        loss_axis.plot(subset["epoch"], subset["val_loss"], label="val loss", color="#ed7d31", linewidth=1.6)
+        f1_axis.plot(subset["epoch"], subset["val_f1"], label="val F1", color="#2f855a", linewidth=1.8)
+        loss_axis.set_title(experiment)
+        loss_axis.set_xlabel("Epoch")
+        loss_axis.set_ylabel("Loss")
+        f1_axis.set_ylabel("Val F1")
+        loss_axis.grid(True, alpha=0.25)
+        loss_axis.set_ylim(bottom=0.0)
+        f1_axis.set_ylim(0.0, 1.0)
+
+        if index == 0:
+            loss_handles, loss_labels = loss_axis.get_legend_handles_labels()
+            f1_handles, f1_labels = f1_axis.get_legend_handles_labels()
+            loss_axis.legend(loss_handles + f1_handles, loss_labels + f1_labels, frameon=False, loc="upper right")
+
+    for index in range(len(experiments), nrows * ncols):
+        row = index // ncols
+        col = index % ncols
+        axes[row][col].axis("off")
+
+    figure.suptitle("Training History Overview")
+    figure.tight_layout()
+    figure.savefig(config.figures_dir / "training_curves.png", dpi=220)
+    plt.close(figure)
 
 
 def _plot_node2vec_projection(users: pd.DataFrame, config: ProjectConfig) -> None:
