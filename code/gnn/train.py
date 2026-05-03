@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import logging
+import random as _random
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
@@ -20,6 +21,14 @@ from ..config import ProjectConfig
 
 LOGGER = logging.getLogger(__name__)
 
+torch.manual_seed(42)
+_random.seed(42)
+np.random.seed(42)
+if torch.cuda.is_available():
+    torch.cuda.manual_seed_all(42)
+torch.backends.cudnn.deterministic = True
+torch.backends.cudnn.benchmark = False
+
 
 @dataclass(slots=True)
 class GNNResult:
@@ -35,6 +44,7 @@ def _scaled_tensor(users: pd.DataFrame, columns: list[str]) -> torch.Tensor:
     matrix = frame.to_numpy(dtype=np.float32)
     scaler = StandardScaler()
     matrix = scaler.fit_transform(matrix).astype(np.float32)
+    matrix = np.nan_to_num(matrix, nan=0.0, posinf=0.0, neginf=0.0)
     return torch.tensor(matrix, dtype=torch.float32)
 
 
@@ -97,10 +107,20 @@ def _train_gnn_model(
         lr=config.gnn_learning_rate,
         weight_decay=config.gnn_weight_decay,
     )
+    total_steps = config.gnn_epochs
+    warmup_steps = min(5, total_steps // 5)
+
+    def lr_lambda(step: int) -> float:
+        if step < warmup_steps:
+            return (step + 1) / warmup_steps
+        return max(0.01, ((total_steps - step) / (total_steps - warmup_steps)) ** 0.5)
+
+    scheduler = torch.optim.lr_scheduler.LambdaLR(optimizer, lr_lambda)
+
     train_labels = labels[train_indices].numpy()
     class_counts = np.bincount(train_labels, minlength=2).astype(np.float32)
     class_weights = class_counts.sum() / np.maximum(class_counts, 1.0)
-    criterion = nn.CrossEntropyLoss(weight=torch.tensor(class_weights, dtype=torch.float32))
+    criterion = nn.CrossEntropyLoss(weight=torch.tensor(class_weights, dtype=torch.float32), label_smoothing=0.1)
 
     best_state: dict[str, torch.Tensor] | None = None
     best_val_f1 = -1.0
@@ -116,7 +136,9 @@ def _train_gnn_model(
         if aux_loss is not None:
             loss = loss + aux_loss
         loss.backward()
+        nn.utils.clip_grad_norm_(model.parameters(), max_norm=1.0)
         optimizer.step()
+        scheduler.step()
 
         model.eval()
         with torch.no_grad():

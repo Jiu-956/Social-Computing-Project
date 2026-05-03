@@ -22,8 +22,13 @@ def compute_transformer_embeddings(
 ) -> pd.DataFrame | None:
     cache_path = config.cache_dir / f"{cache_name}_{safe_slug(config.transformer_model_name)}.joblib"
     if cache_path.exists():
-        cached = joblib.load(cache_path)
-        if isinstance(cached, pd.DataFrame) and _is_valid_embedding_cache(cached, text_df["user_id"], prefix=prefix):
+        try:
+            cached = joblib.load(cache_path)
+        except Exception:
+            LOGGER.warning("Failed to load transformer cache (likely pandas version incompatibility). Recomputing embeddings.")
+            cache_path.unlink(missing_ok=True)
+            cached = None
+        if cached is not None and isinstance(cached, pd.DataFrame) and _is_valid_embedding_cache(cached, text_df["user_id"], prefix=prefix):
             return cached
         LOGGER.warning("Existing transformer cache does not match the current prepared dataset. Recomputing embeddings.")
 
@@ -34,7 +39,9 @@ def compute_transformer_embeddings(
         return None
 
     try:
-        model = SentenceTransformer(config.transformer_model_name)
+        model = SentenceTransformer(
+            str(config.cache_dir / "sentence_transformers_all_minilm_l6_v2"),
+        )
         embeddings = model.encode(
             text_df["text"].fillna("").tolist(),
             batch_size=config.transformer_batch_size,

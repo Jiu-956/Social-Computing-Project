@@ -79,6 +79,7 @@ class FeatureTextGraphTIGN(_FeatureTextGraphBase):
             edge_dim=hidden_dim,
             dropout=dropout,
         )
+        self.norm1 = nn.LayerNorm(hidden_dim)
         self.structural_layer2 = TransformerConv(
             hidden_dim,
             hidden_dim // graph_heads,
@@ -87,6 +88,7 @@ class FeatureTextGraphTIGN(_FeatureTextGraphBase):
             edge_dim=hidden_dim,
             dropout=dropout,
         )
+        self.norm2 = nn.LayerNorm(hidden_dim)
         self.structural_layer3 = TransformerConv(
             hidden_dim,
             hidden_dim // graph_heads,
@@ -95,6 +97,7 @@ class FeatureTextGraphTIGN(_FeatureTextGraphBase):
             edge_dim=hidden_dim,
             dropout=dropout,
         )
+        self.norm3 = nn.LayerNorm(hidden_dim)
 
     def _build_edge_attr(self, edge_type: torch.Tensor) -> torch.Tensor:
         batch_size = edge_type.shape[0]
@@ -144,13 +147,12 @@ class FeatureTextGraphTIGN(_FeatureTextGraphBase):
         bounded_type = edge_type.long().clamp(min=0, max=self.rel_embedding.num_embeddings - 1)
         edge_attr = self._build_edge_attr(bounded_type)
 
-        # Residual connection: pass fused through graph layers and add back fused
-        x = self.structural_layer1(fused, edge_index, edge_attr=edge_attr)
+        x = self.structural_layer1(self.norm1(fused), edge_index, edge_attr=edge_attr)
         x = self.dropout(F.leaky_relu(x)) + fused
-        x = self.structural_layer2(x, edge_index, edge_attr=edge_attr)
+        x = self.structural_layer2(self.norm2(x), edge_index, edge_attr=edge_attr)
         x = self.dropout(F.leaky_relu(x)) + fused
-        x = self.structural_layer3(x, edge_index, edge_attr=edge_attr)
-        x = self.output_mlp(x + fused)  # additional residual
+        x = self.structural_layer3(self.norm3(x), edge_index, edge_attr=edge_attr)
+        x = self.output_mlp(x + fused)
         logits = self.output_head(x)
 
         inv_stack = torch.stack(invariant_parts, dim=1)

@@ -9,6 +9,7 @@ try:
 except Exception:  # pragma: no cover
     TransformerConv = None
 
+from .base import _compatible_attention_heads
 from ..builders.graph_structural_layer import GraphStructuralLayer
 from ..builders.position_encoding import PositionEncodingClusteringCoefficient, PositionEncodingBidirectionalLinks
 
@@ -33,7 +34,7 @@ class GraphTemporalLayer(nn.Module):
         self.layer_norm = nn.LayerNorm(hidden_dim)
         self.feedforward_linear_1 = nn.Linear(hidden_dim, hidden_dim)
         self.activation = nn.PReLU()
-        self.feedforward_linear_2 = nn.Linear(hidden_dim, 2)
+        self.feedforward_linear_2 = nn.Linear(hidden_dim, hidden_dim)
         self.attention_dropout = nn.Dropout(dropout)
         self.num_time_steps = num_time_steps
 
@@ -42,18 +43,23 @@ class GraphTemporalLayer(nn.Module):
         self.LSTM = nn.LSTM(hidden_dim, hidden_dim, batch_first=True)
         self.init_weights()
 
+    def _rebuild_position_embedding(self, num_time_steps: int, device: torch.device) -> None:
+        if self.position_embedding_temporal.num_embeddings != num_time_steps:
+            self.position_embedding_temporal = nn.Embedding(num_time_steps, self.hidden_dim).to(device)
+
     def forward(self, structural_output, position_embedding_clustering_coefficient,
                 position_embedding_bidirectional_links_ratio, exist_nodes):
         if self.temporal_module_type == 'gru':
             gru_output, _ = self.GRU(structural_output)
             y = structural_output + gru_output
+            y = self.layer_norm(y)
             return self.feed_forward(y)
         elif self.temporal_module_type == 'lstm':
             lstm_output, _ = self.LSTM(structural_output)
             y = structural_output + lstm_output
+            y = self.layer_norm(y)
             return self.feed_forward(y)
         else:
-            # attention mode
             structural_input = structural_output
             B = structural_output.shape[0]
             T = self.num_time_steps
@@ -181,8 +187,8 @@ class FeatureTextGraphBotDGT(nn.Module):
         super().__init__()
         self.hidden_dim = hidden_dim
 
-        structural_heads = max(1, hidden_dim // attention_heads)
-        temporal_heads = max(1, hidden_dim // temporal_heads)
+        structural_heads = _compatible_attention_heads(hidden_dim, attention_heads)
+        temporal_head_count = _compatible_attention_heads(hidden_dim, temporal_heads)
 
         self.node_feature_embedding_layer = NodeFeatureEmbeddingLayer(
             hidden_dim=hidden_dim,
@@ -201,16 +207,17 @@ class FeatureTextGraphBotDGT(nn.Module):
         self.structural_layer = GraphStructuralLayer(
             hidden_dim=hidden_dim,
             n_heads=structural_heads,
-            dropout=0.0,
+            dropout=dropout,
         )
         self.num_time_steps = 0
         self.temporal_layer = GraphTemporalLayer(
             hidden_dim=hidden_dim,
-            n_heads=temporal_heads,
+            n_heads=temporal_head_count,
             dropout=dropout,
             num_time_steps=0,
             temporal_module_type=temporal_module,
         )
+        self.output_head = nn.Linear(hidden_dim, 2)
 
     def forward(
         self,
@@ -226,7 +233,7 @@ class FeatureTextGraphBotDGT(nn.Module):
             description: [N, description_dim]
             tweet: [N, tweet_dim]
             num_prop: [N, num_prop_dim]
-            cat_prop: [N, cat_prop_dim]
+            cat_prop: [N, num_prop_dim]
             edge_index: dict with keys: edge_indices, clustering, bidirectional_ratio, keep_ratio
             edge_type: unused
 
@@ -243,43 +250,33 @@ class FeatureTextGraphBotDGT(nn.Module):
         num_time_steps = len(snapshot_edge_indices)
         total_nodes = num_prop.shape[0]
 
-        # Rebuild temporal layer with correct num_time_steps
         if self.num_time_steps != num_time_steps:
             self.num_time_steps = num_time_steps
             self.temporal_layer.num_time_steps = num_time_steps
-            device = description.device
-            self.temporal_layer.position_embedding_temporal = nn.Embedding(
-                num_time_steps, self.hidden_dim
-            ).to(device)
+            self.temporal_layer._rebuild_position_embedding(num_time_steps, description.device)
 
-        # Compute node features once (shared across all snapshots)
         node_features = self.node_feature_embedding_layer(
             description, tweet, num_prop, cat_prop,
-        )  # [N, H]
+        )
 
-        # Process structural layer per snapshot in batches
         all_snapshots_structural_output: list[torch.Tensor] = []
         for t in range(num_time_steps):
             snapshot_edges = snapshot_edge_indices[t]
-            full_output = self.structural_layer(node_features, snapshot_edges)  # [N, H]
+            full_output = self.structural_layer(node_features, snapshot_edges)
             all_snapshots_structural_output.append(full_output)
 
-        # Stack: [T, N, H]
         all_snapshots_structural_output = torch.stack(all_snapshots_structural_output, dim=0)
-        # Transpose to [N, T, H]
         all_snapshots_structural_output = all_snapshots_structural_output.transpose(0, 1)
 
-        # Position embeddings: [T, N, 1] -> encode -> [T, N, H] -> transpose -> [N, T, H]
         position_embedding_clustering_coefficient = torch.stack([
-            self.position_encoding_clustering_coefficient_layer(clustering[t])
+            self.position_encoding_clustering_coefficient_layer(clustering[t].clamp(-100, 100))
             for t in range(num_time_steps)
         ], dim=0).transpose(0, 1)
         position_embedding_bidirectional_links_ratio = torch.stack([
-            self.position_encoding_bidirectional_links_ratio_layer(bidirectional_ratio[t])
+            self.position_encoding_bidirectional_links_ratio_layer(bidirectional_ratio[t].clamp(0, 1))
             for t in range(num_time_steps)
         ], dim=0).transpose(0, 1)
 
-        # exist_nodes: all 1s (all nodes exist in all snapshots)
         exist_nodes = torch.ones(
             num_time_steps, total_nodes,
             dtype=torch.long, device=description.device,
@@ -290,10 +287,9 @@ class FeatureTextGraphBotDGT(nn.Module):
             position_embedding_clustering_coefficient,
             position_embedding_bidirectional_links_ratio,
             exist_nodes,
-        )  # [N, T, H]
+        )
 
-        # Use output at last time step
-        logits = temporal_output[:, -1, :]  # [N, 2]
+        logits = self.output_head(temporal_output[:, -1, :])
 
         aux_loss = torch.tensor(0.0, device=logits.device)
         return logits, aux_loss
