@@ -372,6 +372,7 @@ def _extract_profile_row(record: dict[str, Any], now: datetime) -> dict[str, Any
         "tweet_count": tweet_count,
         "listed_count": listed,
         "account_age_days": account_age_days,
+        "created_at": created_at.isoformat() if created_at else None,
         "username_length": float(len(username)),
         "display_name_length": float(len(display_name)),
         "description_length": float(len(description)),
@@ -517,6 +518,7 @@ def _is_cached_frame_compatible(users: pd.DataFrame, graph_edges: pd.DataFrame) 
         "tweet_text",
         "combined_text",
         "default_profile_image",
+        "created_at",
     }
     required_edge_columns = {"source_id", "relation", "target_id"}
     return required_user_columns.issubset(set(users.columns)) and required_edge_columns.issubset(set(graph_edges.columns))

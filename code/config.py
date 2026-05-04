@@ -70,6 +70,12 @@ class ProjectConfig:
     botdgt_weight_decay: float = 1e-2
     botdgt_loss_coefficient: float = 1.1
     botdgt_epochs: int = 20
+    # BotDGT new-module parameters (matching reference)
+    botdgt_batch_size: int = 64
+    botdgt_interval: str = "year"
+    botdgt_structural_heads: int = 4
+    botdgt_window_size: int = -1
+    botdgt_embedding_dropout: float = 0.3
     tign_num_age_buckets: int = 3
     tign_intra_class_weight: float = 0.02
 

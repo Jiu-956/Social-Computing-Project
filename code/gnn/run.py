@@ -220,12 +220,29 @@ def run_graph_neural_models(
             "TransformerConv is unavailable, skipping feature_text_graph_botsai, feature_text_graph_botdgt and feature_text_graph_tign."
         )
 
-    # Support --only-tign flag: only run the last model (TIGN)
+    # Support --only-tign / --only-botdgt flags
     import os as _os
     if _os.environ.get("ONLY_BOTDGT"):
         model_specs = [s for s in model_specs if s[0] == "feature_text_graph_botdgt"]
     elif _os.environ.get("ONLY_TIGN") and len(model_specs) > 1:
         model_specs = [model_specs[-1]]  # TIGN is always the last
+
+    # BotDGT uses the new independent module (NeighborLoader + calendar snapshots)
+    botdgt_specs = [s for s in model_specs if s[0] == "feature_text_graph_botdgt"]
+    model_specs = [s for s in model_specs if s[0] != "feature_text_graph_botdgt"]
+
+    for name, _, _, _ in botdgt_specs:
+        LOGGER.info("Running graph neural model: %s (new BotDGT module)", name)
+        from .botdgt import run_botdgt
+        botdgt_result = run_botdgt(config=config)
+        from .train import GNNResult
+        outputs.append(GNNResult(
+            metrics_rows=botdgt_result["metrics_rows"],
+            predictions=botdgt_result["predictions"],
+            best_val_f1=botdgt_result["best_val_f1"],
+            artifact_path=botdgt_result["artifact_path"],
+            training_history=botdgt_result["training_history"],
+        ))
 
     for name, model, edge_index, edge_type, *rest in model_specs:
         LOGGER.info("Running graph neural model: %s", name)
@@ -233,53 +250,6 @@ def run_graph_neural_models(
         train_cfg: ModelTrainConfig | None = None
         if rest:
             train_cfg = rest[0]
-
-        if name == "feature_text_graph_botdgt":
-            # Set up separate param groups for BotDGT (full-batch)
-            structural_params = (
-                list(model.node_feature_embedding_layer.parameters())
-                + list(model.structural_layer.parameters())
-            )
-            temporal_params = list(model.temporal_layer.parameters())
-            botdgt_epochs = max(config.botdgt_epochs, config.gnn_epochs)
-            train_cfg = ModelTrainConfig(
-                param_group_lrs=[
-                    {"params": structural_params, "lr": config.botdgt_structural_lr * 10},
-                    {"params": temporal_params, "lr": config.botdgt_temporal_lr * 20},
-                ],
-                weight_decay=config.botdgt_weight_decay,
-                use_class_weight=False,
-                label_smoothing=0.0,
-                gradient_clip_norm=None,
-                lr_schedule="cosine",
-                cosine_t_max=botdgt_epochs,
-                all_snapshots_loss=True,
-                loss_coefficient=config.botdgt_loss_coefficient,
-                n_epochs=botdgt_epochs,
-            )
-            # BotDGT: full-graph structural encoding, extract labeled nodes for temporal+loss
-            botdgt_labeled_labels = labels[labeled_indices]
-            outputs.append(
-                _train_gnn_model(
-                    config=config,
-                    name=name,
-                    users=botdgt_labeled_users,
-                    model=model,
-                    description_tensor=description_tensor,
-                    tweet_tensor=tweet_tensor,
-                    num_prop_tensor=num_prop_tensor,
-                    cat_prop_tensor=cat_prop_tensor,
-                    labels=botdgt_labeled_labels,
-                    train_indices=botdgt_train,
-                    val_indices=botdgt_val,
-                    test_indices=botdgt_test,
-                    edge_index=edge_index,
-                    edge_type=edge_type,
-                    train_cfg=train_cfg,
-                    model_kwargs={"labeled_indices": labeled_indices},
-                )
-            )
-            continue
 
         outputs.append(
             _train_gnn_model(
