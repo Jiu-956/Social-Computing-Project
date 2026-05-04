@@ -145,7 +145,7 @@ class TIGNv2Trainer:
         ]
         self.optimizer = torch.optim.AdamW(params, weight_decay=self.args.weight_decay)
         self.scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(
-            self.optimizer, T_max=20, eta_min=0,
+            self.optimizer, T_max=self.args.epoch, eta_min=0,
         )
 
         self.best_val_metrics = _null_metrics()
@@ -217,6 +217,8 @@ class TIGNv2Trainer:
         all_output = []
         all_exist_nodes = []
         total_loss = 0.0
+        total_components = {}
+        num_batches = 0
         for batch_size, batch_n_id, batch_edge_index, batch_exist_nodes, \
             batch_clustering_coefficient, batch_bidirectional_links_ratio in \
                 zip(self.train_right, self.train_n_id, self.train_edge_index, self.train_exist_nodes,
@@ -227,6 +229,9 @@ class TIGNv2Trainer:
                 batch_clustering_coefficient, batch_bidirectional_links_ratio,
             )
             total_loss += loss.item() / self.args.window_size / len(self.train_right)
+            for k, v in loss_components.items():
+                total_components[k] = total_components.get(k, 0.0) + v
+            num_batches += 1
             loss.backward()
             self.optimizer.step()
             all_output.append(output)
@@ -239,6 +244,12 @@ class TIGNv2Trainer:
         metrics["loss"] = total_loss
 
         parts = [f"Epoch-{current_epoch} train loss: {total_loss:.6f}"]
+        if num_batches > 0:
+            ce = total_components.get("ce_loss", 0) / num_batches
+            cm = total_components.get("cross_modal_inv", 0) / num_batches
+            ct = total_components.get("temporal_inv", 0) / num_batches
+            sd = total_components.get("specific_decorr", 0) / num_batches
+            parts.append(f"(CE:{ce:.4f} CM:{cm:.4f} CT:{ct:.4f} SD:{sd:.4f})")
         for key in ["accuracy", "precision", "recall", "f1"]:
             parts.append(f"{key}: {metrics[key]:.6f}")
         LOGGER.info(" ".join(parts))
@@ -341,8 +352,8 @@ def run_tignv2(config: ProjectConfig) -> dict:
         cross_modal_weight=config.tignv2_cross_modal_weight,
         temporal_inv_weight=config.tignv2_temporal_invariance_weight,
         specific_decorr_weight=config.tignv2_specific_decorr_weight,
-        early_stop=False,
-        patience=10,
+        early_stop=True,
+        patience=15,
     )
 
     LOGGER.info("=== TIGN-v2: Starting training ===")

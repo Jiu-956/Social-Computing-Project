@@ -63,13 +63,13 @@ class ProjectConfig:
     botdgt_temporal_heads: int = 4
     botdgt_temporal_smoothness_weight: float = 0.05
     botdgt_temporal_consistency_weight: float = 0.03
-    botdgt_structural_lr: float = 1e-4
-    botdgt_temporal_lr: float = 1e-5
+    botdgt_structural_lr: float = 2e-4
+    botdgt_temporal_lr: float = 5e-5
     botdgt_structural_dropout: float = 0.0
     botdgt_temporal_dropout: float = 0.5
     botdgt_weight_decay: float = 1e-2
     botdgt_loss_coefficient: float = 1.1
-    botdgt_epochs: int = 20
+    botdgt_epochs: int = 50
     # BotDGT new-module parameters (matching reference)
     botdgt_batch_size: int = 64
     botdgt_interval: str = "year"
@@ -79,9 +79,9 @@ class ProjectConfig:
     tign_num_age_buckets: int = 3
     tign_intra_class_weight: float = 0.02
     # TIGN-v2 parameters
-    tignv2_cross_modal_weight: float = 0.05
-    tignv2_temporal_invariance_weight: float = 0.03
-    tignv2_specific_decorr_weight: float = 0.025
+    tignv2_cross_modal_weight: float = 0.03
+    tignv2_temporal_invariance_weight: float = 0.015
+    tignv2_specific_decorr_weight: float = 0.01
 
     visualization_sample_size: int = 3000
     random_state: int = 1234
