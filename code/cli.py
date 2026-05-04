@@ -70,6 +70,20 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--botdgt-weight-decay", type=float, default=1e-2)
     parser.add_argument("--botdgt-loss-coefficient", type=float, default=1.1)
     parser.add_argument("--botdgt-epochs", type=int, default=20)
+    # TIGN-v2 独立参数
+    parser.add_argument("--tignv2-epochs", type=int, default=80)
+    parser.add_argument("--tignv2-patience", type=int, default=20)
+    parser.add_argument("--tignv2-structural-lr", type=float, default=3e-4)
+    parser.add_argument("--tignv2-temporal-lr", type=float, default=1e-4)
+    parser.add_argument("--tignv2-weight-decay", type=float, default=5e-3)
+    parser.add_argument("--tignv2-loss-coefficient", type=float, default=1.0)
+    parser.add_argument("--tignv2-structural-dropout", type=float, default=0.1)
+    parser.add_argument("--tignv2-temporal-dropout", type=float, default=0.3)
+    parser.add_argument("--tignv2-embedding-dropout", type=float, default=0.3)
+    parser.add_argument("--tignv2-structural-heads", type=int, default=4)
+    parser.add_argument("--tignv2-temporal-heads", type=int, default=4)
+    parser.add_argument("--tignv2-batch-size", type=int, default=64)
+    parser.add_argument("--tignv2-interval", type=str, default="month")
     parser.add_argument("--tign-num-age-buckets", type=int, default=3)
     parser.add_argument("--tign-intra-class-weight", type=float, default=0.02)
     parser.add_argument("--tignv2-cross-modal-weight", type=float, default=0.05)
@@ -129,6 +143,19 @@ def make_config(args: argparse.Namespace) -> ProjectConfig:
         botdgt_weight_decay=args.botdgt_weight_decay,
         botdgt_loss_coefficient=args.botdgt_loss_coefficient,
         botdgt_epochs=args.botdgt_epochs,
+        tignv2_epochs=args.tignv2_epochs,
+        tignv2_patience=args.tignv2_patience,
+        tignv2_structural_lr=args.tignv2_structural_lr,
+        tignv2_temporal_lr=args.tignv2_temporal_lr,
+        tignv2_weight_decay=args.tignv2_weight_decay,
+        tignv2_loss_coefficient=args.tignv2_loss_coefficient,
+        tignv2_structural_dropout=args.tignv2_structural_dropout,
+        tignv2_temporal_dropout=args.tignv2_temporal_dropout,
+        tignv2_embedding_dropout=args.tignv2_embedding_dropout,
+        tignv2_structural_heads=args.tignv2_structural_heads,
+        tignv2_temporal_heads=args.tignv2_temporal_heads,
+        tignv2_batch_size=args.tignv2_batch_size,
+        tignv2_interval=args.tignv2_interval,
         tign_num_age_buckets=args.tign_num_age_buckets,
         tign_intra_class_weight=args.tign_intra_class_weight,
         tignv2_cross_modal_weight=args.tignv2_cross_modal_weight,

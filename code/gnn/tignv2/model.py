@@ -92,10 +92,10 @@ class TIGNv2Model(nn.Module):
 
         # 每模态 invariant/specific 编码器（权重跨时间共享）
         self.modality_encoders = nn.ModuleList([
-            _PerModalityInvariantEncoder(768, self.block_dim),   # description
-            _PerModalityInvariantEncoder(768, self.block_dim),   # tweet
-            _PerModalityInvariantEncoder(5, self.block_dim),     # numerical
-            _PerModalityInvariantEncoder(3, self.block_dim),     # categorical
+            _PerModalityInvariantEncoder(768, self.block_dim, args.embedding_dropout),
+            _PerModalityInvariantEncoder(768, self.block_dim, args.embedding_dropout),
+            _PerModalityInvariantEncoder(5, self.block_dim, args.embedding_dropout),
+            _PerModalityInvariantEncoder(3, self.block_dim, args.embedding_dropout),
         ])
 
         # 通道注意力融合

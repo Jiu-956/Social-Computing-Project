@@ -72,10 +72,11 @@ def _load_cached_batches(interval: str, batch_size: int, seed: int, split: str):
 
 
 class BotDGTDataset:
-    def __init__(self, config: ProjectConfig):
+    def __init__(self, config: ProjectConfig, *, interval: str | None = None,
+                 batch_size: int | None = None, window_size: int | None = None):
         self.device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-        self.interval = config.botdgt_interval
-        self.batch_size = config.botdgt_batch_size
+        self.interval = interval if interval is not None else config.botdgt_interval
+        self.batch_size = batch_size if batch_size is not None else config.botdgt_batch_size
         self.seed = config.random_state
         self.window_size = -1
 
@@ -83,9 +84,10 @@ class BotDGTDataset:
         self.graphs, _ = _load_graphs(self.interval)
         self.graphs = [g.to(self.device) for g in self.graphs]
 
-        if config.botdgt_window_size > 0 and len(self.graphs) > config.botdgt_window_size:
-            self.graphs = self.graphs[-config.botdgt_window_size:]
-            self.window_size = config.botdgt_window_size
+        _ws = window_size if window_size is not None else config.botdgt_window_size
+        if _ws > 0 and len(self.graphs) > _ws:
+            self.graphs = self.graphs[-_ws:]
+            self.window_size = _ws
         else:
             self.window_size = len(self.graphs)
 

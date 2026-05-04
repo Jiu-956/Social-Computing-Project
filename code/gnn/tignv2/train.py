@@ -43,6 +43,7 @@ class _Args:
     cross_modal_weight: float
     temporal_inv_weight: float
     specific_decorr_weight: float
+    embedding_dropout: float
     early_stop: bool
     patience: int
 
@@ -329,31 +330,33 @@ def run_tignv2(config: ProjectConfig) -> dict:
     device_str = "cuda" if torch.cuda.is_available() else "cpu"
 
     LOGGER.info("=== TIGN-v2: Loading BotDGT dataset (calendar-month snapshots) ===")
-    dataset = BotDGTDataset(config)
+    dataset = BotDGTDataset(config, interval=config.tignv2_interval,
+                            batch_size=config.tignv2_batch_size)
 
     args = _Args(
         hidden_dim=config.gnn_hidden_dim,
-        structural_head_config=config.botdgt_structural_heads,
-        structural_drop=config.botdgt_structural_dropout,
-        temporal_head_config=config.botdgt_temporal_heads,
-        temporal_drop=config.botdgt_temporal_dropout,
+        structural_head_config=config.tignv2_structural_heads,
+        structural_drop=config.tignv2_structural_dropout,
+        temporal_head_config=config.tignv2_temporal_heads,
+        temporal_drop=config.tignv2_temporal_dropout,
         window_size=dataset.window_size,
         temporal_module_type=config.botdgt_temporal_module,
-        structural_learning_rate=config.botdgt_structural_lr,
-        temporal_learning_rate=config.botdgt_temporal_lr,
-        weight_decay=config.botdgt_weight_decay,
-        epoch=config.botdgt_epochs,
+        structural_learning_rate=config.tignv2_structural_lr,
+        temporal_learning_rate=config.tignv2_temporal_lr,
+        weight_decay=config.tignv2_weight_decay,
+        epoch=config.tignv2_epochs,
         seed=config.random_state,
         device=device_str,
         dataset_name="Twibot-20",
-        interval=config.botdgt_interval,
-        batch_size=config.botdgt_batch_size,
-        coefficient=config.botdgt_loss_coefficient,
+        interval=config.tignv2_interval,
+        batch_size=config.tignv2_batch_size,
+        coefficient=config.tignv2_loss_coefficient,
         cross_modal_weight=config.tignv2_cross_modal_weight,
         temporal_inv_weight=config.tignv2_temporal_invariance_weight,
         specific_decorr_weight=config.tignv2_specific_decorr_weight,
+        embedding_dropout=config.tignv2_embedding_dropout,
         early_stop=True,
-        patience=15,
+        patience=config.tignv2_patience,
     )
 
     LOGGER.info("=== TIGN-v2: Starting training ===")

@@ -76,6 +76,20 @@ class ProjectConfig:
     botdgt_structural_heads: int = 4
     botdgt_window_size: int = -1
     botdgt_embedding_dropout: float = 0.3
+    # TIGN-v2 独立参数
+    tignv2_epochs: int = 80
+    tignv2_patience: int = 20
+    tignv2_structural_lr: float = 3e-4
+    tignv2_temporal_lr: float = 1e-4
+    tignv2_weight_decay: float = 5e-3
+    tignv2_loss_coefficient: float = 1.0
+    tignv2_structural_dropout: float = 0.1
+    tignv2_temporal_dropout: float = 0.3
+    tignv2_embedding_dropout: float = 0.3
+    tignv2_structural_heads: int = 4
+    tignv2_temporal_heads: int = 4
+    tignv2_batch_size: int = 64
+    tignv2_interval: str = "month"
     tign_num_age_buckets: int = 3
     tign_intra_class_weight: float = 0.02
     # TIGN-v2 parameters
