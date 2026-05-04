@@ -29,7 +29,23 @@ def compute_transformer_embeddings(
             cache_path.unlink(missing_ok=True)
             cached = None
         if cached is not None and isinstance(cached, pd.DataFrame) and _is_valid_embedding_cache(cached, text_df["user_id"], prefix=prefix):
+            LOGGER.info("Transformer cache hit: %s (%d users)", cache_name, len(cached))
             return cached
+        # Cache exists but validation failed - try a more lenient check to avoid unnecessary recompute
+        if cached is not None and isinstance(cached, pd.DataFrame) and "user_id" in cached.columns:
+            cached_ids = set(cached["user_id"].astype(str).tolist())
+            expected_ids = set(text_df["user_id"].astype(str).tolist())
+            if cached_ids == expected_ids:
+                emb_cols = [c for c in cached.columns if c.startswith(prefix)]
+                has_nan = False
+                if emb_cols:
+                    try:
+                        has_nan = cached[emb_cols].isna().any().any()
+                    except Exception:
+                        has_nan = True
+                if not has_nan:
+                    LOGGER.info("Transformer cache hit (lenient): %s (%d users)", cache_name, len(cached))
+                    return cached
         LOGGER.warning("Existing transformer cache does not match the current prepared dataset. Recomputing embeddings.")
 
     try:

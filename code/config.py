@@ -89,13 +89,14 @@ class ProjectConfig:
     tignv2_structural_heads: int = 4
     tignv2_temporal_heads: int = 4
     tignv2_batch_size: int = 64
-    tignv2_interval: str = "month"
+    tignv2_interval: str = "six_months"
     tign_num_age_buckets: int = 3
     tign_intra_class_weight: float = 0.02
     # TIGN-v2 parameters
-    tignv2_cross_modal_weight: float = 0.03
-    tignv2_temporal_invariance_weight: float = 0.015
-    tignv2_specific_decorr_weight: float = 0.01
+    tignv2_cross_modal_weight: float = 0.0
+    tignv2_temporal_invariance_weight: float = 0.0
+    tignv2_specific_decorr_weight: float = 0.0
+    tignv2_loss_coefficient: float = 1.05
 
     visualization_sample_size: int = 3000
     random_state: int = 1234

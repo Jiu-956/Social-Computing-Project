@@ -88,7 +88,7 @@ class TIGNv2Model(nn.Module):
         self.temporal_drop = args.temporal_drop
         self.window_size = args.window_size
         self.temporal_module_type = args.temporal_module_type
-        self.block_dim = max(8, self.hidden_dim // 4)
+        self.block_dim = max(16, self.hidden_dim // 2)
 
         # 每模态 invariant/specific 编码器（权重跨时间共享）
         self.modality_encoders = nn.ModuleList([
@@ -136,7 +136,6 @@ class TIGNv2Model(nn.Module):
         self.temporal_fusion = nn.Sequential(
             nn.Linear(self.block_dim + self.hidden_dim * 2, self.hidden_dim),
             nn.PReLU(),
-            nn.Dropout(0.3),
         )
 
         # 输出头
