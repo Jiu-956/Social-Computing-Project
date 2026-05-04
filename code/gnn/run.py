@@ -213,6 +213,12 @@ def run_graph_neural_models(
                     age_relation_edge_index,
                     age_relation_edge_type,
                 ),
+                (
+                    "feature_text_graph_tignv2",
+                    None,
+                    None,
+                    None,
+                ),
             ]
         )
     else:
@@ -220,16 +226,19 @@ def run_graph_neural_models(
             "TransformerConv is unavailable, skipping feature_text_graph_botsai, feature_text_graph_botdgt and feature_text_graph_tign."
         )
 
-    # Support --only-tign / --only-botdgt flags
+    # Support --only-tign / --only-botdgt / --only-tignv2 flags
     import os as _os
     if _os.environ.get("ONLY_BOTDGT"):
         model_specs = [s for s in model_specs if s[0] == "feature_text_graph_botdgt"]
-    elif _os.environ.get("ONLY_TIGN") and len(model_specs) > 1:
-        model_specs = [model_specs[-1]]  # TIGN is always the last
+    elif _os.environ.get("ONLY_TIGNV2"):
+        model_specs = [s for s in model_specs if s[0] == "feature_text_graph_tignv2"]
+    elif _os.environ.get("ONLY_TIGN"):
+        model_specs = [s for s in model_specs if s[0] == "feature_text_graph_tign"]
 
     # BotDGT uses the new independent module (NeighborLoader + calendar snapshots)
     botdgt_specs = [s for s in model_specs if s[0] == "feature_text_graph_botdgt"]
-    model_specs = [s for s in model_specs if s[0] != "feature_text_graph_botdgt"]
+    tignv2_specs = [s for s in model_specs if s[0] == "feature_text_graph_tignv2"]
+    model_specs = [s for s in model_specs if s[0] not in ("feature_text_graph_botdgt", "feature_text_graph_tignv2")]
 
     for name, _, _, _ in botdgt_specs:
         LOGGER.info("Running graph neural model: %s (new BotDGT module)", name)
@@ -242,6 +251,19 @@ def run_graph_neural_models(
             best_val_f1=botdgt_result["best_val_f1"],
             artifact_path=botdgt_result["artifact_path"],
             training_history=botdgt_result["training_history"],
+        ))
+
+    for name, _, _, _ in tignv2_specs:
+        LOGGER.info("Running graph neural model: %s (TIGN-v2: temporal invariance)", name)
+        from .tignv2 import run_tignv2
+        tignv2_result = run_tignv2(config=config)
+        from .train import GNNResult
+        outputs.append(GNNResult(
+            metrics_rows=tignv2_result["metrics_rows"],
+            predictions=tignv2_result["predictions"],
+            best_val_f1=tignv2_result["best_val_f1"],
+            artifact_path=tignv2_result["artifact_path"],
+            training_history=tignv2_result["training_history"],
         ))
 
     for name, model, edge_index, edge_type, *rest in model_specs:

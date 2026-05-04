@@ -42,7 +42,8 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--node2vec-inout-q", type=float, default=2.0)
 
     parser.add_argument("--skip-gnn", action="store_true")
-    parser.add_argument("--only-tign", action="store_true", help="Run only the TIGN GNN model (requires --disable-transformer)")
+    parser.add_argument("--only-tign", action="store_true", help="Run only the TIGN GNN model")
+    parser.add_argument("--only-tignv2", action="store_true", help="Run only the TIGN-v2 GNN model")
     parser.add_argument("--gnn-hidden-dim", type=int, default=128)
     parser.add_argument("--gnn-epochs", type=int, default=50)
     parser.add_argument("--gnn-patience", type=int, default=10)
@@ -71,6 +72,9 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--botdgt-epochs", type=int, default=20)
     parser.add_argument("--tign-num-age-buckets", type=int, default=3)
     parser.add_argument("--tign-intra-class-weight", type=float, default=0.02)
+    parser.add_argument("--tignv2-cross-modal-weight", type=float, default=0.05)
+    parser.add_argument("--tignv2-temporal-invariance-weight", type=float, default=0.03)
+    parser.add_argument("--tignv2-specific-decorr-weight", type=float, default=0.025)
 
     parser.add_argument("--visualization-sample-size", type=int, default=3000)
     parser.add_argument("--random-state", type=int, default=42)
@@ -127,6 +131,9 @@ def make_config(args: argparse.Namespace) -> ProjectConfig:
         botdgt_epochs=args.botdgt_epochs,
         tign_num_age_buckets=args.tign_num_age_buckets,
         tign_intra_class_weight=args.tign_intra_class_weight,
+        tignv2_cross_modal_weight=args.tignv2_cross_modal_weight,
+        tignv2_temporal_invariance_weight=args.tignv2_temporal_invariance_weight,
+        tignv2_specific_decorr_weight=args.tignv2_specific_decorr_weight,
         visualization_sample_size=args.visualization_sample_size,
         random_state=args.random_state,
     )
@@ -147,7 +154,9 @@ def main() -> None:
         prepare_dataset(config)
     elif args.command == "train":
         import os as _os
-        if getattr(args, "only_tign", False):
+        if getattr(args, "only_tignv2", False):
+            _os.environ["ONLY_TIGNV2"] = "1"
+        elif getattr(args, "only_tign", False):
             _os.environ["ONLY_TIGN"] = "1"
         run_experiments(config)
     elif args.command == "visualize":
