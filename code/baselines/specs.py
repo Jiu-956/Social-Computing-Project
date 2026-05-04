@@ -86,12 +86,6 @@ def _make_specs(
             numeric_columns=graph_cols,
         ),
         ExperimentSpec(
-            name="graph_only_node2vec_logistic_regression",
-            family="graph_only",
-            estimator="logreg",
-            numeric_columns=node2vec_cols,
-        ),
-        ExperimentSpec(
             name="feature_text_tfidf_logistic_regression",
             family="feature_text",
             estimator="logreg",
@@ -104,20 +98,29 @@ def _make_specs(
             estimator="rf",
             numeric_columns=feature_all + graph_cols,
         ),
-        ExperimentSpec(
-            name="feature_graph_node2vec_logistic_regression",
-            family="feature_graph",
-            estimator="logreg",
-            numeric_columns=feature_all + graph_cols + node2vec_cols,
-        ),
-        ExperimentSpec(
-            name="feature_text_graph_tfidf_node2vec_logistic_regression",
-            family="feature_text_graph",
-            estimator="logreg",
-            numeric_columns=feature_all + graph_cols + node2vec_cols,
-            text_mode="tfidf",
-        ),
     ]
+    if node2vec_cols:
+        specs.extend([
+            ExperimentSpec(
+                name="graph_only_node2vec_logistic_regression",
+                family="graph_only",
+                estimator="logreg",
+                numeric_columns=node2vec_cols,
+            ),
+            ExperimentSpec(
+                name="feature_graph_node2vec_logistic_regression",
+                family="feature_graph",
+                estimator="logreg",
+                numeric_columns=feature_all + graph_cols + node2vec_cols,
+            ),
+            ExperimentSpec(
+                name="feature_text_graph_tfidf_node2vec_logistic_regression",
+                family="feature_text_graph",
+                estimator="logreg",
+                numeric_columns=feature_all + graph_cols + node2vec_cols,
+                text_mode="tfidf",
+            ),
+        ])
     if transformer_cols:
         specs.extend([
             ExperimentSpec(

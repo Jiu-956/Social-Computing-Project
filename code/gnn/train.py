@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import logging
 import random as _random
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
@@ -11,6 +11,7 @@ import pandas as pd
 import matplotlib
 import torch
 import torch.nn as nn
+import torch.nn.functional as F
 from sklearn.metrics import accuracy_score, precision_recall_fscore_support, roc_auc_score
 from sklearn.preprocessing import StandardScaler
 
@@ -21,13 +22,29 @@ from ..config import ProjectConfig
 
 LOGGER = logging.getLogger(__name__)
 
-torch.manual_seed(42)
-_random.seed(42)
-np.random.seed(42)
+torch.manual_seed(1234)
+_random.seed(1234)
+np.random.seed(1234)
 if torch.cuda.is_available():
-    torch.cuda.manual_seed_all(42)
+    torch.cuda.manual_seed_all(1234)
 torch.backends.cudnn.deterministic = True
 torch.backends.cudnn.benchmark = False
+
+
+@dataclass(slots=True)
+class ModelTrainConfig:
+    lr: float | None = None
+    weight_decay: float | None = None
+    param_group_lrs: list[dict[str, Any]] | None = None
+    use_class_weight: bool = True
+    label_smoothing: float = 0.1
+    gradient_clip_norm: float | None = 1.0
+    lr_schedule: str = "warmup_cosine"
+    cosine_t_max: int = 50
+    all_snapshots_loss: bool = False
+    loss_coefficient: float = 1.1
+    n_epochs: int | None = None
+    seed: int | None = None
 
 
 @dataclass(slots=True)
@@ -37,6 +54,31 @@ class GNNResult:
     best_val_f1: float
     artifact_path: Path
     training_history: pd.DataFrame
+
+
+def _all_snapshots_loss(
+    criterion: nn.Module,
+    output: torch.Tensor,
+    label: torch.Tensor,
+    coefficient: float = 1.1,
+) -> torch.Tensor:
+    """Compute loss on all snapshots with exponential weighting.
+
+    Faithfully matches reference: sum of weighted per-snapshot losses, no averaging
+    across snapshots (each snapshot's criterion already uses reduction='mean').
+
+    Args:
+        output: [B, T, num_classes] logits for each snapshot
+        label: [B] ground-truth labels
+        coefficient: weight multiplier per snapshot (later snapshots get higher weight)
+    """
+    T = output.shape[1]
+    total_loss = torch.tensor(0.0, device=output.device)
+    for t in range(T):
+        snapshot_logits = output[:, t, :]
+        loss = criterion(snapshot_logits, label)
+        total_loss = total_loss + (coefficient ** t) * loss
+    return total_loss
 
 
 def _scaled_tensor(users: pd.DataFrame, columns: list[str]) -> torch.Tensor:
@@ -101,56 +143,101 @@ def _train_gnn_model(
     test_indices: torch.Tensor,
     edge_index: dict[str, Any] | torch.Tensor,
     edge_type: torch.Tensor | None,
+    train_cfg: ModelTrainConfig | None = None,
+    model_kwargs: dict[str, Any] | None = None,
 ) -> GNNResult:
-    optimizer = torch.optim.AdamW(
-        model.parameters(),
-        lr=config.gnn_learning_rate,
-        weight_decay=config.gnn_weight_decay,
+    if train_cfg is None:
+        train_cfg = ModelTrainConfig()
+
+    if train_cfg.seed is not None:
+        torch.manual_seed(train_cfg.seed)
+        _random.seed(train_cfg.seed)
+        np.random.seed(train_cfg.seed)
+        if torch.cuda.is_available():
+            torch.cuda.manual_seed_all(train_cfg.seed)
+
+    lr = train_cfg.lr if train_cfg.lr is not None else config.gnn_learning_rate
+    wd = train_cfg.weight_decay if train_cfg.weight_decay is not None else config.gnn_weight_decay
+    n_epochs = train_cfg.n_epochs if train_cfg.n_epochs is not None else config.gnn_epochs
+
+    if train_cfg.param_group_lrs is not None:
+        optimizer = torch.optim.AdamW(train_cfg.param_group_lrs, weight_decay=wd)
+    else:
+        optimizer = torch.optim.AdamW(model.parameters(), lr=lr, weight_decay=wd)
+
+    if train_cfg.lr_schedule == "cosine":
+        scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(
+            optimizer, T_max=train_cfg.cosine_t_max, eta_min=0,
+        )
+    else:
+        warmup_steps = min(5, n_epochs // 5)
+        def lr_lambda(step: int) -> float:
+            if step < warmup_steps:
+                return (step + 1) / warmup_steps
+            return max(0.01, ((n_epochs - step) / (n_epochs - warmup_steps)) ** 0.5)
+        scheduler = torch.optim.lr_scheduler.LambdaLR(optimizer, lr_lambda)
+
+    if train_cfg.use_class_weight:
+        train_labels_np = labels[train_indices].numpy()
+        class_counts = np.bincount(train_labels_np, minlength=2).astype(np.float32)
+        class_weights = class_counts.sum() / np.maximum(class_counts, 1.0)
+        weight_tensor = torch.tensor(class_weights, dtype=torch.float32)
+    else:
+        weight_tensor = None
+
+    criterion = nn.CrossEntropyLoss(
+        weight=weight_tensor,
+        label_smoothing=train_cfg.label_smoothing,
     )
-    total_steps = config.gnn_epochs
-    warmup_steps = min(5, total_steps // 5)
-
-    def lr_lambda(step: int) -> float:
-        if step < warmup_steps:
-            return (step + 1) / warmup_steps
-        return max(0.01, ((total_steps - step) / (total_steps - warmup_steps)) ** 0.5)
-
-    scheduler = torch.optim.lr_scheduler.LambdaLR(optimizer, lr_lambda)
-
-    train_labels = labels[train_indices].numpy()
-    class_counts = np.bincount(train_labels, minlength=2).astype(np.float32)
-    class_weights = class_counts.sum() / np.maximum(class_counts, 1.0)
-    criterion = nn.CrossEntropyLoss(weight=torch.tensor(class_weights, dtype=torch.float32), label_smoothing=0.1)
 
     best_state: dict[str, torch.Tensor] | None = None
     best_val_f1 = -1.0
     patience_left = config.gnn_patience
     history_rows: list[dict[str, float | int | str]] = []
 
-    for epoch in range(1, config.gnn_epochs + 1):
+    for epoch in range(1, n_epochs + 1):
         model.train()
         optimizer.zero_grad()
-        raw_output = model(description_tensor, tweet_tensor, num_prop_tensor, cat_prop_tensor, edge_index, edge_type)
+        raw_output = model(description_tensor, tweet_tensor, num_prop_tensor, cat_prop_tensor, edge_index, edge_type, **(model_kwargs or {}))
         logits, aux_loss = _split_model_output(raw_output)
-        loss = criterion(logits[train_indices], labels[train_indices])
+
+        if train_cfg.all_snapshots_loss:
+            loss = _all_snapshots_loss(
+                criterion,
+                logits[train_indices],
+                labels[train_indices],
+                coefficient=train_cfg.loss_coefficient,
+            )
+        else:
+            loss = criterion(logits[train_indices], labels[train_indices])
+
         if aux_loss is not None:
             loss = loss + aux_loss
         loss.backward()
-        nn.utils.clip_grad_norm_(model.parameters(), max_norm=1.0)
+
+        if train_cfg.gradient_clip_norm is not None:
+            nn.utils.clip_grad_norm_(model.parameters(), max_norm=train_cfg.gradient_clip_norm)
+
         optimizer.step()
         scheduler.step()
 
         model.eval()
         with torch.no_grad():
-            raw_output = model(description_tensor, tweet_tensor, num_prop_tensor, cat_prop_tensor, edge_index, edge_type)
+            raw_output = model(description_tensor, tweet_tensor, num_prop_tensor, cat_prop_tensor, edge_index, edge_type, **(model_kwargs or {}))
             logits, _ = _split_model_output(raw_output)
-            train_probs = torch.softmax(logits[train_indices], dim=1)[:, 1].cpu().numpy()
+
+            if train_cfg.all_snapshots_loss:
+                eval_logits = logits[:, -1, :]
+            else:
+                eval_logits = logits
+
+            train_probs = torch.softmax(eval_logits[train_indices], dim=1)[:, 1].cpu().numpy()
             train_preds = (train_probs >= 0.5).astype(int)
             train_true = labels[train_indices].cpu().numpy()
             train_metrics = _compute_metrics(train_true, train_preds, train_probs)
 
-            val_logits = logits[val_indices]
-            val_probs = torch.softmax(logits[val_indices], dim=1)[:, 1].cpu().numpy()
+            val_logits = eval_logits[val_indices]
+            val_probs = torch.softmax(val_logits, dim=1)[:, 1].cpu().numpy()
             val_preds = (val_probs >= 0.5).astype(int)
             val_true = labels[val_indices].cpu().numpy()
             val_metrics = _compute_metrics(val_true, val_preds, val_probs)
@@ -180,7 +267,7 @@ def _train_gnn_model(
             "[%s] epoch %03d/%03d train_loss=%.4f val_loss=%.4f train_f1=%.4f val_f1=%.4f best_val_f1=%.4f patience_left=%d",
             name,
             epoch,
-            config.gnn_epochs,
+            n_epochs,
             float(loss.detach().cpu()),
             val_loss,
             train_metrics["f1"],
@@ -203,10 +290,11 @@ def _train_gnn_model(
 
     model.eval()
     with torch.no_grad():
-        raw_output = model(description_tensor, tweet_tensor, num_prop_tensor, cat_prop_tensor, edge_index, edge_type)
+        raw_output = model(description_tensor, tweet_tensor, num_prop_tensor, cat_prop_tensor, edge_index, edge_type, **(model_kwargs or {}))
         logits, _ = _split_model_output(raw_output)
+        if train_cfg.all_snapshots_loss:
+            logits = logits[:, -1, :]
 
-    # Search for better threshold on val, but only apply if it improves F1 by >0.005 vs 0.5
     search_thresholds = np.linspace(0.2, 0.8, 61)
     val_probs = torch.softmax(logits[val_indices], dim=1)[:, 1].cpu().numpy()
     val_true = labels[val_indices].cpu().numpy()
@@ -214,7 +302,6 @@ def _train_gnn_model(
     test_probs = torch.softmax(logits[test_indices], dim=1)[:, 1].cpu().numpy()
     test_true = labels[test_indices].cpu().numpy()
 
-    # Compute F1 at default 0.5 threshold vs best threshold on val
     val_preds_default = (val_probs >= 0.5).astype(int)
     _, _, val_f1_default, _ = precision_recall_fscore_support(val_true, val_preds_default, average="binary", zero_division=0)
     val_f1_default = float(val_f1_default)
@@ -222,7 +309,6 @@ def _train_gnn_model(
     _, _, val_f1_best, _ = precision_recall_fscore_support(val_true, val_preds_best, average="binary", zero_division=0)
     val_f1_best = float(val_f1_best)
 
-    # Only use the found threshold if it gives meaningful improvement
     if val_f1_best - val_f1_default > 0.005:
         use_th = best_th
     else:

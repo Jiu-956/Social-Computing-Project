@@ -62,6 +62,13 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--botdgt-temporal-heads", type=int, default=4)
     parser.add_argument("--botdgt-temporal-smoothness-weight", type=float, default=0.05)
     parser.add_argument("--botdgt-temporal-consistency-weight", type=float, default=0.03)
+    parser.add_argument("--botdgt-structural-lr", type=float, default=1e-4)
+    parser.add_argument("--botdgt-temporal-lr", type=float, default=1e-5)
+    parser.add_argument("--botdgt-structural-dropout", type=float, default=0.0)
+    parser.add_argument("--botdgt-temporal-dropout", type=float, default=0.5)
+    parser.add_argument("--botdgt-weight-decay", type=float, default=1e-2)
+    parser.add_argument("--botdgt-loss-coefficient", type=float, default=1.1)
+    parser.add_argument("--botdgt-epochs", type=int, default=20)
     parser.add_argument("--tign-num-age-buckets", type=int, default=3)
     parser.add_argument("--tign-intra-class-weight", type=float, default=0.02)
 
@@ -111,6 +118,13 @@ def make_config(args: argparse.Namespace) -> ProjectConfig:
         botdgt_temporal_heads=args.botdgt_temporal_heads,
         botdgt_temporal_smoothness_weight=args.botdgt_temporal_smoothness_weight,
         botdgt_temporal_consistency_weight=args.botdgt_temporal_consistency_weight,
+        botdgt_structural_lr=args.botdgt_structural_lr,
+        botdgt_temporal_lr=args.botdgt_temporal_lr,
+        botdgt_structural_dropout=args.botdgt_structural_dropout,
+        botdgt_temporal_dropout=args.botdgt_temporal_dropout,
+        botdgt_weight_decay=args.botdgt_weight_decay,
+        botdgt_loss_coefficient=args.botdgt_loss_coefficient,
+        botdgt_epochs=args.botdgt_epochs,
         tign_num_age_buckets=args.tign_num_age_buckets,
         tign_intra_class_weight=args.tign_intra_class_weight,
         visualization_sample_size=args.visualization_sample_size,

@@ -34,7 +34,7 @@ class ProjectConfig:
     dense_text_svd_dim: int = 64
 
     use_transformer: bool = True
-    transformer_model_name: str = "sentence-transformers/all-MiniLM-L6-v2"
+    transformer_model_name: str = "sentence-transformers/all-mpnet-base-v2"
     transformer_batch_size: int = 32
     transformer_max_length: int = 128
 
@@ -63,11 +63,18 @@ class ProjectConfig:
     botdgt_temporal_heads: int = 4
     botdgt_temporal_smoothness_weight: float = 0.05
     botdgt_temporal_consistency_weight: float = 0.03
+    botdgt_structural_lr: float = 1e-4
+    botdgt_temporal_lr: float = 1e-5
+    botdgt_structural_dropout: float = 0.0
+    botdgt_temporal_dropout: float = 0.5
+    botdgt_weight_decay: float = 1e-2
+    botdgt_loss_coefficient: float = 1.1
+    botdgt_epochs: int = 20
     tign_num_age_buckets: int = 3
     tign_intra_class_weight: float = 0.02
 
     visualization_sample_size: int = 3000
-    random_state: int = 42
+    random_state: int = 1234
 
     cache_dir: Path = field(init=False)
     logs_dir: Path = field(init=False)

@@ -106,7 +106,27 @@ def run_experiments(config: ProjectConfig) -> dict[str, Any]:
             training_history_frames.append(training_history)
 
     if config.run_gnn:
-        gnn_users = users.merge(description_dense, on="user_id", how="left").merge(tweet_dense, on="user_id", how="left")
+        gnn_description_frame = description_dense
+        gnn_tweet_frame = tweet_dense
+        if transformer_frame is not None:
+            desc_transformer_frame = compute_transformer_embeddings(
+                config=config,
+                text_df=users[["user_id", manifest["description_text_column"]]].rename(columns={manifest["description_text_column"]: "text"}),
+                cache_name="description_transformer_embeddings",
+                prefix="des_trans_",
+            )
+            tweet_transformer_frame = compute_transformer_embeddings(
+                config=config,
+                text_df=users[["user_id", manifest["tweet_text_column"]]].rename(columns={manifest["tweet_text_column"]: "text"}),
+                cache_name="tweet_transformer_embeddings",
+                prefix="tweet_trans_",
+            )
+            if desc_transformer_frame is not None:
+                gnn_description_frame = desc_transformer_frame
+            if tweet_transformer_frame is not None:
+                gnn_tweet_frame = tweet_transformer_frame
+
+        gnn_users = users.merge(gnn_description_frame, on="user_id", how="left").merge(gnn_tweet_frame, on="user_id", how="left")
         if transformer_frame is not None:
             gnn_users = gnn_users.merge(transformer_frame, on="user_id", how="left")
         gnn_users = gnn_users.fillna(0.0)
@@ -115,8 +135,8 @@ def run_experiments(config: ProjectConfig) -> dict[str, Any]:
             config=config,
             users=gnn_users,
             graph_edges=prepared.graph_edges,
-            description_columns=[column for column in description_dense.columns if column != "user_id"],
-            tweet_columns=[column for column in tweet_dense.columns if column != "user_id"],
+            description_columns=[column for column in gnn_description_frame.columns if column != "user_id"],
+            tweet_columns=[column for column in gnn_tweet_frame.columns if column != "user_id"],
             num_property_columns=manifest["gnn_num_property_columns"],
             cat_property_columns=manifest["gnn_cat_property_columns"],
         ):

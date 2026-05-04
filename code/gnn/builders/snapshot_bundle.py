@@ -32,9 +32,11 @@ def _build_botdgt_snapshot_bundle(
         valid_mask = pd.notna(all_sources) & pd.notna(all_targets)
         source_array = np.asarray(all_sources[valid_mask], dtype=np.int64)
         target_array = np.asarray(all_targets[valid_mask], dtype=np.int64)
+        relation_array = graph_edges["relation"].values[valid_mask]
     else:
         source_array = np.array([], dtype=np.int64)
         target_array = np.array([], dtype=np.int64)
+        relation_array = np.array([], dtype=object)
 
     edge_indices: list[torch.Tensor] = []
     clustering_list: list[torch.Tensor] = []
@@ -50,8 +52,9 @@ def _build_botdgt_snapshot_bundle(
         previous_mask = valid_edges
         snapshot_source = source_array[valid_edges]
         snapshot_target = target_array[valid_edges]
+        snapshot_edge_count = snapshot_source.size
 
-        if snapshot_source.size == 0:
+        if snapshot_edge_count == 0:
             edge_indices.append(torch.empty((2, 0), dtype=torch.long))
             clustering_list.append(torch.zeros((node_count, 1), dtype=torch.float32))
             bidirectional_list.append(torch.zeros((node_count, 1), dtype=torch.float32))
@@ -60,38 +63,20 @@ def _build_botdgt_snapshot_bundle(
 
         edge_indices.append(torch.tensor(np.stack([snapshot_source, snapshot_target], axis=0), dtype=torch.long))
 
-        undirected_degree = np.bincount(
-            np.concatenate([snapshot_source, snapshot_target]),
-            minlength=node_count,
-        ).astype(np.float32)
-        max_degree = max(1.0, float(undirected_degree.max()))
-        clustering_proxy = (undirected_degree / max_degree).reshape(-1, 1)
-        clustering_list.append(torch.tensor(clustering_proxy, dtype=torch.float32))
+        # --- Clustering coefficient (networkx, matches reference) ---
+        clustering_tensor = _compute_clustering_coefficient(
+            snapshot_source, snapshot_target, node_count,
+        )
 
-        # O(n log n) bidirectional ratio: for each node, count outgoing edges with a reverse edge
-        out_degree = np.bincount(snapshot_source, minlength=node_count).astype(np.float32)
-        # Fully vectorized bidirectional ratio: O(n log n) via sorted search
-        reciprocal = np.zeros(node_count, dtype=np.float32)
-        if snapshot_source.size > 0:
-            N = node_count
-            forward_keys = snapshot_source * N + snapshot_target
-            reverse_keys = snapshot_target * N + snapshot_source
-            uf, uf_idx = np.unique(forward_keys, return_index=True)
-            ur = np.unique(reverse_keys)
-            # Sort ur, then binary-search each uf key
-            ur_sorted = np.sort(ur)
-            # np.searchsorted returns insertion positions; check if key equals neighbor at that position
-            pos = np.searchsorted(ur_sorted, uf)
-            pos = np.clip(pos, 0, ur_sorted.size - 1)
-            matches = ur_sorted[pos] == uf
-            src_nodes = uf[matches] // N
-            np.add.at(reciprocal, src_nodes, 1)
+        # --- Bidirectional links ratio (matches reference logic, vectorized) ---
+        bidirectional_tensor = _compute_bidirectional_ratio(
+            snapshot_source, snapshot_target, relation_array[valid_edges], node_count,
+        )
 
-        with np.errstate(divide="ignore", invalid="ignore"):
-            ratio = np.divide(reciprocal, out_degree, out=np.zeros_like(reciprocal), where=out_degree > 0)
-        bidirectional_list.append(torch.tensor(ratio.reshape(-1, 1), dtype=torch.float32))
+        clustering_list.append(clustering_tensor)
+        bidirectional_list.append(bidirectional_tensor)
 
-        density_value = float(snapshot_source.size / denominator)
+        density_value = float(snapshot_edge_count / denominator)
         density_list.append(torch.full((node_count, 1), density_value, dtype=torch.float32))
 
     return {
@@ -101,3 +86,89 @@ def _build_botdgt_snapshot_bundle(
         "edge_density": torch.stack(density_list, dim=0),
         "keep_ratio": torch.tensor(keep_ratios, dtype=torch.float32).view(snapshot_count, 1, 1).repeat(1, node_count, 1),
     }
+
+
+def _compute_clustering_coefficient(
+    source: np.ndarray,
+    target: np.ndarray,
+    node_count: int,
+) -> torch.Tensor:
+    """Compute clustering coefficient using triangle counting (vectorized).
+
+    Matches networkx.clustering(G) for undirected graphs without requiring
+    the full networkx dependency or the O(|V| * d_max^2) overhead.
+    """
+    import numpy as np
+    n = node_count
+
+    # Build adjacency as dict-of-sets for efficient triangle counting
+    # We only build for nodes that have edges
+    adj: dict[int, set] = {}
+    degree = np.zeros(n, dtype=np.float32)
+    for s, t in zip(source, target, strict=False):
+        si, ti = int(s), int(t)
+        if si == ti:
+            continue
+        if si not in adj:
+            adj[si] = set()
+        if ti not in adj:
+            adj[ti] = set()
+        adj[si].add(ti)
+        adj[ti].add(si)
+        degree[si] += 1.0
+        degree[ti] += 1.0
+
+    clustering = np.zeros(n, dtype=np.float32)
+    for v, neighbors in adj.items():
+        dv = len(neighbors)
+        if dv < 2:
+            clustering[v] = 0.0
+            continue
+        triangles = 0
+        neighbors_list = list(neighbors)
+        for i in range(dv):
+            u = neighbors_list[i]
+            u_neighbors = adj.get(u, set())
+            for j in range(i + 1, dv):
+                w = neighbors_list[j]
+                if w in u_neighbors:
+                    triangles += 1
+        clustering[v] = (2.0 * triangles) / (dv * (dv - 1))
+
+    return torch.tensor(clustering.reshape(-1, 1), dtype=torch.float32)
+
+
+def _compute_bidirectional_ratio(
+    source: np.ndarray,
+    target: np.ndarray,
+    relations: np.ndarray,
+    node_count: int,
+) -> torch.Tensor:
+    """Compute bidirectional links ratio using the reference logic.
+
+    Only considers 'follow' edges. For each node, counts outgoing follow edges
+    that have a reciprocal follow edge, divided by out_degree.
+    """
+    n = node_count
+    follow_mask = relations == "follow"
+    follow_src = source[follow_mask]
+    follow_tgt = target[follow_mask]
+
+    out_degree = np.bincount(follow_src, minlength=n).astype(np.float32)
+    reciprocal = np.zeros(n, dtype=np.float32)
+
+    if follow_src.size > 0:
+        forward_keys = follow_src * n + follow_tgt
+        reverse_keys = follow_tgt * n + follow_src
+        uf = np.unique(forward_keys)
+        ur_sorted = np.sort(np.unique(reverse_keys))
+        if ur_sorted.size > 0:
+            pos = np.searchsorted(ur_sorted, uf)
+            pos = np.clip(pos, 0, ur_sorted.size - 1)
+            matches = ur_sorted[pos] == uf
+            match_src = uf[matches] // n
+            np.add.at(reciprocal, match_src, 1)
+
+    with np.errstate(divide="ignore", invalid="ignore"):
+        ratio = np.divide(reciprocal, out_degree, out=np.zeros_like(reciprocal), where=out_degree > 0)
+    return torch.tensor(ratio.reshape(-1, 1), dtype=torch.float32)

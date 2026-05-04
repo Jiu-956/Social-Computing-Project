@@ -29,7 +29,7 @@ from .models import (
     FeatureTextGraphGCN,
     FeatureTextGraphTIGN,
 )
-from .train import _scaled_tensor, _train_gnn_model, GNNResult
+from .train import _scaled_tensor, _train_gnn_model, GNNResult, ModelTrainConfig
 
 LOGGER = logging.getLogger(__name__)
 
@@ -120,35 +120,41 @@ def run_graph_neural_models(
     ]
 
     if TRANSFORMER_CONV_AVAILABLE:
+        # BotSAI and TIGN use labeled nodes for training
         labeled_user_ids = set(users.loc[users["label_id"] >= 0, "user_id"])
-        botdgt_users = users[users["user_id"].isin(labeled_user_ids)].copy()
-        botdgt_id_to_index = {uid: i for i, uid in enumerate(botdgt_users["user_id"])}
+        labeled_mask = labels >= 0
+        labeled_indices = torch.nonzero(labeled_mask, as_tuple=False).squeeze(-1)
+
+        # Helper to map global-user-index to within-labeled-subset index
+        global_to_labeled = {int(idx): i for i, idx in enumerate(labeled_indices.tolist())}
+
+        # --- BotDGT: use ALL nodes for full-graph structural encoding ---
         dynamic_bundle = _build_botdgt_snapshot_bundle(
-            users=botdgt_users,
+            users=users,
             graph_edges=graph_edges,
-            id_to_index=botdgt_id_to_index,
+            id_to_index=id_to_index,
             snapshot_count=config.botdgt_snapshot_count,
             min_keep_ratio=config.botdgt_min_keep_ratio,
         )
-        # Tensors for BotDGT: only labeled nodes
-        botdgt_description = description_tensor[list(botdgt_users.index)]
-        botdgt_tweet = tweet_tensor[list(botdgt_users.index)]
-        botdgt_num_prop = num_prop_tensor[list(botdgt_users.index)]
-        botdgt_cat_prop = cat_prop_tensor[list(botdgt_users.index)]
-        botdgt_labels = labels[list(botdgt_users.index)]
-        # global indices within labeled set
+
+        # Train/val/test indices within the labeled subset (re-indexed)
+        botdgt_labeled_users = users[users["user_id"].isin(labeled_user_ids)]
         botdgt_train = torch.tensor(
-            [i for i, split in enumerate(botdgt_users["split"]) if split == "train" and botdgt_users["label_id"].iloc[i] >= 0],
+            [global_to_labeled[i] for i, split in enumerate(users["split"])
+             if split == "train" and users["label_id"].iloc[i] >= 0],
             dtype=torch.long,
         )
         botdgt_val = torch.tensor(
-            [i for i, split in enumerate(botdgt_users["split"]) if split == "val" and botdgt_users["label_id"].iloc[i] >= 0],
+            [global_to_labeled[i] for i, split in enumerate(users["split"])
+             if split == "val" and users["label_id"].iloc[i] >= 0],
             dtype=torch.long,
         )
         botdgt_test = torch.tensor(
-            [i for i, split in enumerate(botdgt_users["split"]) if split == "test" and botdgt_users["label_id"].iloc[i] >= 0],
+            [global_to_labeled[i] for i, split in enumerate(users["split"])
+             if split == "test" and users["label_id"].iloc[i] >= 0],
             dtype=torch.long,
         )
+
         model_specs.extend(
             [
                 (
@@ -183,6 +189,8 @@ def run_graph_neural_models(
                         temporal_heads=config.botdgt_temporal_heads,
                         temporal_smoothness_weight=config.botdgt_temporal_smoothness_weight,
                         temporal_consistency_weight=config.botdgt_temporal_consistency_weight,
+                        structural_dropout=config.botdgt_structural_dropout,
+                        temporal_dropout=config.botdgt_temporal_dropout,
                     ),
                     dynamic_bundle,
                     None,
@@ -214,30 +222,61 @@ def run_graph_neural_models(
 
     # Support --only-tign flag: only run the last model (TIGN)
     import os as _os
-    if _os.environ.get("ONLY_TIGN") and len(model_specs) > 1:
+    if _os.environ.get("ONLY_BOTDGT"):
+        model_specs = [s for s in model_specs if s[0] == "feature_text_graph_botdgt"]
+    elif _os.environ.get("ONLY_TIGN") and len(model_specs) > 1:
         model_specs = [model_specs[-1]]  # TIGN is always the last
 
-    for name, model, edge_index, edge_type in model_specs:
+    for name, model, edge_index, edge_type, *rest in model_specs:
         LOGGER.info("Running graph neural model: %s", name)
 
+        train_cfg: ModelTrainConfig | None = None
+        if rest:
+            train_cfg = rest[0]
+
         if name == "feature_text_graph_botdgt":
-            # BotDGT uses only labeled nodes for subgraph
+            # Set up separate param groups for BotDGT (full-batch)
+            structural_params = (
+                list(model.node_feature_embedding_layer.parameters())
+                + list(model.structural_layer.parameters())
+            )
+            temporal_params = list(model.temporal_layer.parameters())
+            botdgt_epochs = max(config.botdgt_epochs, config.gnn_epochs)
+            train_cfg = ModelTrainConfig(
+                param_group_lrs=[
+                    {"params": structural_params, "lr": config.botdgt_structural_lr * 10},
+                    {"params": temporal_params, "lr": config.botdgt_temporal_lr * 20},
+                ],
+                weight_decay=config.botdgt_weight_decay,
+                use_class_weight=False,
+                label_smoothing=0.0,
+                gradient_clip_norm=None,
+                lr_schedule="cosine",
+                cosine_t_max=botdgt_epochs,
+                all_snapshots_loss=True,
+                loss_coefficient=config.botdgt_loss_coefficient,
+                n_epochs=botdgt_epochs,
+            )
+            # BotDGT: full-graph structural encoding, extract labeled nodes for temporal+loss
+            botdgt_labeled_labels = labels[labeled_indices]
             outputs.append(
                 _train_gnn_model(
                     config=config,
                     name=name,
-                    users=botdgt_users,
+                    users=botdgt_labeled_users,
                     model=model,
-                    description_tensor=botdgt_description,
-                    tweet_tensor=botdgt_tweet,
-                    num_prop_tensor=botdgt_num_prop,
-                    cat_prop_tensor=botdgt_cat_prop,
-                    labels=botdgt_labels,
+                    description_tensor=description_tensor,
+                    tweet_tensor=tweet_tensor,
+                    num_prop_tensor=num_prop_tensor,
+                    cat_prop_tensor=cat_prop_tensor,
+                    labels=botdgt_labeled_labels,
                     train_indices=botdgt_train,
                     val_indices=botdgt_val,
                     test_indices=botdgt_test,
                     edge_index=edge_index,
                     edge_type=edge_type,
+                    train_cfg=train_cfg,
+                    model_kwargs={"labeled_indices": labeled_indices},
                 )
             )
             continue
@@ -258,6 +297,7 @@ def run_graph_neural_models(
                 test_indices=test_indices,
                 edge_index=edge_index,
                 edge_type=edge_type,
+                train_cfg=train_cfg,
             )
         )
     return outputs
