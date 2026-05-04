@@ -55,9 +55,7 @@ def compute_transformer_embeddings(
         return None
 
     try:
-        model = SentenceTransformer(
-            str(config.cache_dir / "sentence_transformers_all_minilm_l6_v2"),
-        )
+        model = SentenceTransformer(config.transformer_model_name)
         embeddings = model.encode(
             text_df["text"].fillna("").tolist(),
             batch_size=config.transformer_batch_size,
