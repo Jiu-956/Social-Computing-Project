@@ -244,29 +244,21 @@ class TIGNv2Trainer:
         metrics = _compute_metrics_one_snapshot(all_label[-1], all_output[-1], exist_nodes=all_exist_nodes[-1])
         metrics["loss"] = total_loss
 
-        parts = [f"Epoch-{current_epoch} train loss: {total_loss:.6f}"]
         if num_batches > 0:
             ce = total_components.get("ce_loss", 0) / num_batches
             cm = total_components.get("cross_modal_inv", 0) / num_batches
             ct = total_components.get("temporal_inv", 0) / num_batches
             sd = total_components.get("specific_decorr", 0) / num_batches
-            parts.append(f"(CE:{ce:.4f} CM:{cm:.4f} CT:{ct:.4f} SD:{sd:.4f})")
-        for key in ["accuracy", "precision", "recall", "f1"]:
-            parts.append(f"{key}: {metrics[key]:.6f}")
-        LOGGER.info(" ".join(parts))
+            LOGGER.debug("train CE:%.4f CM:%.4f CT:%.4f SD:%.4f", ce, cm, ct, sd)
         return metrics
 
     @torch.no_grad()
-    def val_per_epoch(self, current_epoch):
+    def val_per_epoch(self):
         self.model.eval()
         metrics = self.forward_one_epoch(
             self.val_right, self.val_n_id, self.val_edge_index, self.val_exist_nodes,
             self.val_clustering_coefficient, self.val_bidirectional_links_ratio,
         )
-        parts = [f"Epoch-{current_epoch} val loss: {metrics['loss']:.6f}"]
-        for key in ["accuracy", "precision", "recall", "f1"]:
-            parts.append(f"{key}: {metrics[key]:.6f}")
-        LOGGER.info(" ".join(parts))
         return metrics
 
     @torch.no_grad()
@@ -284,13 +276,13 @@ class TIGNv2Trainer:
         validate_score_non_improvement_count = 0
         self.model.train()
         for current_epoch in range(self.args.epoch):
-            self.train_per_epoch(current_epoch)
+            train_metrics = self.train_per_epoch(current_epoch)
             self.scheduler.step()
-            val_metrics = self.val_per_epoch(current_epoch)
+            val_metrics = self.val_per_epoch()
 
             self.history_rows.append({
                 "epoch": current_epoch,
-                "train_loss": 0.0,
+                "train_loss": train_metrics["loss"],
                 "val_loss": val_metrics["loss"],
                 "val_accuracy": val_metrics["accuracy"],
                 "val_f1": val_metrics["f1"],
@@ -307,8 +299,17 @@ class TIGNv2Trainer:
                 validate_score_non_improvement_count += 1
             self.last_state_dict = deepcopy(self.model.state_dict())
 
+            patience_left = self.args.patience - validate_score_non_improvement_count
+            LOGGER.info(
+                "[feature_text_graph_tignv2] epoch %03d/%03d train_loss=%.4f val_loss=%.4f train_f1=%.4f val_f1=%.4f best_val_f1=%.4f patience_left=%d",
+                current_epoch, self.args.epoch,
+                train_metrics["loss"], val_metrics["loss"],
+                train_metrics["f1"], val_metrics["f1"],
+                self.best_val_f1, patience_left,
+            )
+
             if self.args.early_stop and validate_score_non_improvement_count >= self.args.patience:
-                LOGGER.info("Early stopping at epoch: %d", current_epoch)
+                LOGGER.info("[feature_text_graph_tignv2] Early stopping at epoch %d", current_epoch)
                 break
 
         best_state = self.test_state_dict_list[-1] if self.test_state_dict_list else self.last_state_dict
