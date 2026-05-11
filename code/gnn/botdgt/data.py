@@ -72,6 +72,7 @@ def _load_cached_batches(interval: str, batch_size: int, seed: int, split: str):
 
 
 BOTDGT_ABLATION_MODES = ("full", "no_profile", "no_text", "no_graph")
+BOTDGT_GRAPH_PROXY_NUMERIC_INDICES = (0, 3, 4)
 
 
 class BotDGTDataset:
@@ -140,6 +141,19 @@ class BotDGTDataset:
         elif self.ablation_mode == "no_text":
             self.des_tensor = torch.zeros_like(self.des_tensor)
             self.tweets_tensor = torch.zeros_like(self.tweets_tensor)
+        elif self.ablation_mode == "no_graph":
+            self._apply_graph_proxy_feature_ablation()
+
+    def _apply_graph_proxy_feature_ablation(self) -> None:
+        indices = [index for index in BOTDGT_GRAPH_PROXY_NUMERIC_INDICES if index < self.num_prop.shape[1]]
+        if not indices:
+            return
+        self.num_prop = self.num_prop.clone()
+        self.num_prop[:, indices] = 0.0
+        LOGGER.info(
+            "BotDGT no_graph ablation zeroed graph-proxy numeric feature columns: %s",
+            indices,
+        )
 
     def _apply_graph_ablation(self) -> None:
         if self.ablation_mode != "no_graph":
