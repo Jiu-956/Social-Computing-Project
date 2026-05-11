@@ -33,6 +33,8 @@ from .train import _scaled_tensor, _train_gnn_model, GNNResult, ModelTrainConfig
 
 LOGGER = logging.getLogger(__name__)
 
+BOTDGT_ABLATION_MODES = ("full", "no_profile", "no_text", "no_graph")
+
 
 def run_graph_neural_models(
     config: ProjectConfig,
@@ -240,18 +242,28 @@ def run_graph_neural_models(
     tignv2_specs = [s for s in model_specs if s[0] == "feature_text_graph_tignv2"]
     model_specs = [s for s in model_specs if s[0] not in ("feature_text_graph_botdgt", "feature_text_graph_tignv2")]
 
+    botdgt_raw_results: list[dict[str, Any]] = []
     for name, _, _, _ in botdgt_specs:
         LOGGER.info("Running graph neural model: %s (new BotDGT module)", name)
         from .botdgt import run_botdgt
-        botdgt_result = run_botdgt(config=config)
-        from .train import GNNResult
-        outputs.append(GNNResult(
-            metrics_rows=botdgt_result["metrics_rows"],
-            predictions=botdgt_result["predictions"],
-            best_val_f1=botdgt_result["best_val_f1"],
-            artifact_path=botdgt_result["artifact_path"],
-            training_history=botdgt_result["training_history"],
-        ))
+
+        ablation_setting = getattr(config, "botdgt_ablation", "full")
+        ablation_modes = list(BOTDGT_ABLATION_MODES) if ablation_setting == "all" else [ablation_setting]
+        for ablation_mode in ablation_modes:
+            LOGGER.info("Running BotDGT ablation mode: %s", ablation_mode)
+            botdgt_result = run_botdgt(config=config, ablation_mode=ablation_mode)
+            botdgt_raw_results.append(botdgt_result)
+            from .train import GNNResult
+            outputs.append(GNNResult(
+                metrics_rows=botdgt_result["metrics_rows"],
+                predictions=botdgt_result["predictions"],
+                best_val_f1=botdgt_result["best_val_f1"],
+                artifact_path=botdgt_result["artifact_path"],
+                training_history=botdgt_result["training_history"],
+            ))
+
+    if botdgt_raw_results:
+        _write_botdgt_modality_ablation_table(config, botdgt_raw_results)
 
     for name, _, _, _ in tignv2_specs:
         LOGGER.info("Running graph neural model: %s (TIGN-v2: temporal invariance)", name)
@@ -293,3 +305,55 @@ def run_graph_neural_models(
             )
         )
     return outputs
+
+
+def _write_botdgt_modality_ablation_table(config: ProjectConfig, results: list[dict[str, Any]]) -> None:
+    metrics = []
+    for result in results:
+        for row in result.get("metrics_rows", []):
+            metrics.append(
+                {
+                    **row,
+                    "ablation_mode": result.get("ablation_mode", "full"),
+                    "removed_modality": result.get("removed_modality", "none"),
+                }
+            )
+    metrics_df = pd.DataFrame(metrics)
+    if metrics_df.empty or "full" not in set(metrics_df["ablation_mode"].astype(str)):
+        return
+
+    rows: list[dict[str, Any]] = []
+    for split_name in ("val", "test"):
+        split_metrics = metrics_df[metrics_df["split"] == split_name].copy()
+        if split_metrics.empty:
+            continue
+        baseline_rows = split_metrics[split_metrics["ablation_mode"] == "full"]
+        if baseline_rows.empty:
+            continue
+        baseline = baseline_rows.iloc[0]
+        for _, ablated in split_metrics[split_metrics["ablation_mode"] != "full"].iterrows():
+            rows.append(
+                {
+                    "experiment": ablated["experiment"],
+                    "removed_modality": ablated["removed_modality"],
+                    "split": split_name,
+                    "baseline_accuracy": float(baseline["accuracy"]),
+                    "ablated_accuracy": float(ablated["accuracy"]),
+                    "accuracy_drop": float(baseline["accuracy"] - ablated["accuracy"]),
+                    "baseline_precision": float(baseline["precision"]),
+                    "ablated_precision": float(ablated["precision"]),
+                    "precision_drop": float(baseline["precision"] - ablated["precision"]),
+                    "baseline_recall": float(baseline["recall"]),
+                    "ablated_recall": float(ablated["recall"]),
+                    "recall_drop": float(baseline["recall"] - ablated["recall"]),
+                    "baseline_f1": float(baseline["f1"]),
+                    "ablated_f1": float(ablated["f1"]),
+                    "f1_drop": float(baseline["f1"] - ablated["f1"]),
+                }
+            )
+
+    if rows:
+        pd.DataFrame(rows).sort_values(["split", "f1_drop"], ascending=[True, False]).to_csv(
+            config.tables_dir / "botdgt_modality_ablation.csv",
+            index=False,
+        )

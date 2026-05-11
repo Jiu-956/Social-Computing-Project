@@ -80,6 +80,7 @@ def generate_visualizations(config: ProjectConfig) -> None:
     _plot_information_effectiveness(metrics, analysis_tables, config)
     _plot_method_differences(metrics, analysis_tables["source_contribution_details"], config)
     _plot_explainability_signals(signal_tables, config)
+    _plot_botdgt_modality_ablation(config)
     _plot_embedding_separation_map(users, config)
     _plot_local_network_patterns(users, metrics, config)
     _cleanup_unused_figures(config)
@@ -305,6 +306,56 @@ def _plot_source_ablation(ablation: pd.DataFrame, config: ProjectConfig) -> None
     figure.suptitle(f"Source Ablation on {title_suffix}")
     figure.tight_layout()
     figure.savefig(config.figures_dir / "source_ablation.png", dpi=200)
+    plt.close(figure)
+
+
+def _plot_botdgt_modality_ablation(config: ProjectConfig) -> None:
+    ablation_path = config.tables_dir / "botdgt_modality_ablation.csv"
+    if not ablation_path.exists():
+        return
+
+    ablation = pd.read_csv(ablation_path, low_memory=False)
+    if ablation.empty:
+        return
+
+    test_ablation = ablation[ablation["split"] == "test"].copy()
+    if test_ablation.empty:
+        return
+
+    label_map = {
+        "profile": "Profile attributes",
+        "text": "User text",
+        "graph": "Network structure",
+    }
+    color_map = {
+        "profile": COLOR_PROFILE,
+        "text": COLOR_TEXT,
+        "graph": COLOR_GRAPH,
+    }
+    test_ablation = test_ablation.sort_values("f1_drop", ascending=True)
+    labels = test_ablation["removed_modality"].map(label_map).fillna(test_ablation["removed_modality"])
+    colors = [color_map.get(str(value), COLOR_NEUTRAL) for value in test_ablation["removed_modality"]]
+
+    figure, axis = plt.subplots(figsize=(9.5, 5.5))
+    _apply_axis_style(axis)
+    axis.barh(labels, test_ablation["f1_drop"], color=colors)
+    axis.axvline(0.0, color="#666666", linewidth=0.8)
+    axis.set_xlabel("Test F1 drop after retraining")
+    axis.set_title("BotDGT Modality Ablation")
+
+    max_abs = max(0.01, float(test_ablation["f1_drop"].abs().max()))
+    axis.set_xlim(
+        min(0.0, float(test_ablation["f1_drop"].min())) - max_abs * 0.18,
+        max(0.0, float(test_ablation["f1_drop"].max())) + max_abs * 0.24,
+    )
+    for index, value in enumerate(test_ablation["f1_drop"]):
+        offset = max_abs * 0.04
+        x_pos = value + offset if value >= 0 else value - offset
+        ha = "left" if value >= 0 else "right"
+        axis.text(x_pos, index, f"{value:.4f}", va="center", ha=ha, fontsize=10)
+
+    figure.tight_layout()
+    figure.savefig(config.figures_dir / "botdgt_modality_ablation.png", dpi=220)
     plt.close(figure)
 
 

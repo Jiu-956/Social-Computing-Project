@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import logging
+import os
 import random as _random
 from typing import Any
 
@@ -28,6 +29,9 @@ LOGGER = logging.getLogger(__name__)
 
 def run_experiments(config: ProjectConfig) -> dict[str, Any]:
     config.ensure_directories()
+    if os.environ.get("ONLY_BOTDGT"):
+        return _run_botdgt_only_experiments(config)
+
     prepared = load_prepared_dataset(config)
     users = prepared.users.copy()
     labeled = users[users["label_id"] >= 0].copy()
@@ -161,6 +165,55 @@ def run_experiments(config: ProjectConfig) -> dict[str, Any]:
     with (config.models_dir / "best_experiment.json").open("w", encoding="utf-8") as handle:
         json.dump({"best_experiment": best_experiment, "best_val_f1": best_val_f1}, handle, ensure_ascii=False, indent=2)
     LOGGER.info("Best experiment: %s (val_f1=%.4f)", best_experiment, best_val_f1)
+    return {
+        "metrics": metrics_df,
+        "predictions": predictions_df,
+        "family_summary": family_summary,
+        "best_experiment": best_experiment,
+    }
+
+
+def _run_botdgt_only_experiments(config: ProjectConfig) -> dict[str, Any]:
+    from ..gnn.botdgt import run_botdgt
+    from ..gnn.run import BOTDGT_ABLATION_MODES, _write_botdgt_modality_ablation_table
+
+    ablation_setting = getattr(config, "botdgt_ablation", "full")
+    ablation_modes = list(BOTDGT_ABLATION_MODES) if ablation_setting == "all" else [ablation_setting]
+
+    metrics_rows: list[dict[str, Any]] = []
+    prediction_frames: list[pd.DataFrame] = []
+    training_history_frames: list[pd.DataFrame] = []
+    raw_results: list[dict[str, Any]] = []
+    best_experiment = ""
+    best_val_f1 = -1.0
+
+    for ablation_mode in ablation_modes:
+        LOGGER.info("Running BotDGT-only experiment: %s", ablation_mode)
+        result = run_botdgt(config=config, ablation_mode=ablation_mode)
+        raw_results.append(result)
+        metrics_rows.extend(result["metrics_rows"])
+        prediction_frames.append(result["predictions"])
+        if not result["training_history"].empty:
+            training_history_frames.append(result["training_history"])
+        if result["best_val_f1"] > best_val_f1:
+            best_val_f1 = float(result["best_val_f1"])
+            best_experiment = result["artifact_path"].stem
+
+    metrics_df = pd.DataFrame(metrics_rows)
+    if not metrics_df.empty:
+        metrics_df = metrics_df.sort_values(["split", "f1", "auc_roc"], ascending=[True, False, False]).reset_index(drop=True)
+    predictions_df = pd.concat(prediction_frames, ignore_index=True) if prediction_frames else pd.DataFrame()
+    family_summary = _build_family_summary(metrics_df)
+
+    metrics_df.to_csv(config.tables_dir / "experiment_metrics.csv", index=False)
+    predictions_df.to_csv(config.tables_dir / "experiment_predictions.csv", index=False)
+    family_summary.to_csv(config.tables_dir / "family_summary.csv", index=False)
+    if training_history_frames:
+        pd.concat(training_history_frames, ignore_index=True).to_csv(config.tables_dir / "training_history.csv", index=False)
+    with (config.models_dir / "best_experiment.json").open("w", encoding="utf-8") as handle:
+        json.dump({"best_experiment": best_experiment, "best_val_f1": best_val_f1}, handle, ensure_ascii=False, indent=2)
+    _write_botdgt_modality_ablation_table(config, raw_results)
+    LOGGER.info("Best BotDGT experiment: %s (val_f1=%.4f)", best_experiment, best_val_f1)
     return {
         "metrics": metrics_df,
         "predictions": predictions_df,

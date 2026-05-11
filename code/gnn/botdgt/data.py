@@ -71,14 +71,21 @@ def _load_cached_batches(interval: str, batch_size: int, seed: int, split: str):
     return result
 
 
+BOTDGT_ABLATION_MODES = ("full", "no_profile", "no_text", "no_graph")
+
+
 class BotDGTDataset:
     def __init__(self, config: ProjectConfig, *, interval: str | None = None,
-                 batch_size: int | None = None, window_size: int | None = None):
+                 batch_size: int | None = None, window_size: int | None = None,
+                 ablation_mode: str = "full"):
+        if ablation_mode not in BOTDGT_ABLATION_MODES:
+            raise ValueError(f"Unknown BotDGT ablation mode: {ablation_mode}")
         self.device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
         self.interval = interval if interval is not None else config.botdgt_interval
         self.batch_size = batch_size if batch_size is not None else config.botdgt_batch_size
         self.seed = config.random_state
         self.window_size = -1
+        self.ablation_mode = ablation_mode
 
         # Load graphs with interval selection
         self.graphs, _ = _load_graphs(self.interval)
@@ -112,6 +119,7 @@ class BotDGTDataset:
         self.tweets_tensor = self.tweets_tensor.to(self.device)
         self.num_prop = self.num_prop.to(self.device)
         self.category_prop = self.category_prop.to(self.device)
+        self._apply_feature_ablation()
 
         LOGGER.info(
             "BotDGTDataset: %d nodes, %d snapshots, interval=%s, train=%d val=%d test=%d",
@@ -123,6 +131,41 @@ class BotDGTDataset:
         self._load_or_build_batches("train")
         self._load_or_build_batches("val")
         self._load_or_build_batches("test")
+        self._apply_graph_ablation()
+
+    def _apply_feature_ablation(self) -> None:
+        if self.ablation_mode == "no_profile":
+            self.num_prop = torch.zeros_like(self.num_prop)
+            self.category_prop = torch.zeros_like(self.category_prop)
+        elif self.ablation_mode == "no_text":
+            self.des_tensor = torch.zeros_like(self.des_tensor)
+            self.tweets_tensor = torch.zeros_like(self.tweets_tensor)
+
+    def _apply_graph_ablation(self) -> None:
+        if self.ablation_mode != "no_graph":
+            return
+        for split in ("train", "val", "test"):
+            edge_batches = getattr(self, f"{split}_edge_index")
+            clustering_batches = getattr(self, f"{split}_clustering_coefficient")
+            bidirectional_batches = getattr(self, f"{split}_bidirectional_links_ratio")
+            setattr(
+                self,
+                f"{split}_edge_index",
+                [
+                    [torch.empty((2, 0), dtype=edge_index.dtype) for edge_index in batch]
+                    for batch in edge_batches
+                ],
+            )
+            setattr(
+                self,
+                f"{split}_clustering_coefficient",
+                [[torch.zeros_like(values) for values in batch] for batch in clustering_batches],
+            )
+            setattr(
+                self,
+                f"{split}_bidirectional_links_ratio",
+                [[torch.zeros_like(values) for values in batch] for batch in bidirectional_batches],
+            )
 
     def _load_or_build_batches(self, split: str):
         cached = _load_cached_batches(self.interval, self.batch_size, self.seed, split)

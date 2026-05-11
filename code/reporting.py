@@ -51,6 +51,12 @@ def generate_report(config: ProjectConfig) -> Path:
     test_source_summary = source_summary[source_summary["split"] == "test"].copy()
     test_source_details = source_details[source_details["split"] == "test"].copy()
     test_source_ablation = source_ablation[source_ablation["split"] == "test"].copy()
+    botdgt_ablation_path = config.tables_dir / "botdgt_modality_ablation.csv"
+    if botdgt_ablation_path.exists():
+        botdgt_ablation = pd.read_csv(botdgt_ablation_path, low_memory=False)
+        test_botdgt_ablation = botdgt_ablation[botdgt_ablation["split"] == "test"].copy()
+    else:
+        test_botdgt_ablation = pd.DataFrame()
 
     report_lines = [
         "# 基于 TwiBot-20 的社交机器人检测实验报告",
@@ -108,6 +114,28 @@ def generate_report(config: ProjectConfig) -> Path:
             "",
             "### 3.3 第三层：可解释性分析",
             "这部分重点回答模型到底在看什么信号，以及这些信号是否能支持多源互补的结论。",
+            "",
+        ]
+    )
+    report_lines.extend(
+        [
+            "### BotDGT 三大模态重训练消融",
+            _to_markdown_table(
+                test_botdgt_ablation[
+                    [
+                        "experiment",
+                        "removed_modality",
+                        "baseline_f1",
+                        "ablated_f1",
+                        "f1_drop",
+                        "baseline_accuracy",
+                        "ablated_accuracy",
+                        "accuracy_drop",
+                    ]
+                ]
+                if not test_botdgt_ablation.empty
+                else test_botdgt_ablation
+            ),
             "",
         ]
     )

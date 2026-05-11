@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import argparse
 import logging
+import sys
 from pathlib import Path
 
 from .config import ProjectConfig
@@ -42,6 +43,7 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--node2vec-inout-q", type=float, default=2.0)
 
     parser.add_argument("--skip-gnn", action="store_true")
+    parser.add_argument("--only-botdgt", action="store_true", help="Run only the BotDGT GNN model")
     parser.add_argument("--only-tign", action="store_true", help="Run only the TIGN GNN model")
     parser.add_argument("--only-tignv2", action="store_true", help="Run only the TIGN-v2 GNN model")
     parser.add_argument("--gnn-hidden-dim", type=int, default=128)
@@ -70,6 +72,13 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--botdgt-weight-decay", type=float, default=1e-2)
     parser.add_argument("--botdgt-loss-coefficient", type=float, default=1.1)
     parser.add_argument("--botdgt-epochs", type=int, default=20)
+    parser.add_argument(
+        "--botdgt-ablation",
+        type=str,
+        default="full",
+        choices=("full", "no_profile", "no_text", "no_graph", "all"),
+        help="BotDGT modality ablation mode",
+    )
     # TIGN-v2 独立参数
     parser.add_argument("--tignv2-epochs", type=int, default=80)
     parser.add_argument("--tignv2-patience", type=int, default=20)
@@ -143,6 +152,7 @@ def make_config(args: argparse.Namespace) -> ProjectConfig:
         botdgt_weight_decay=args.botdgt_weight_decay,
         botdgt_loss_coefficient=args.botdgt_loss_coefficient,
         botdgt_epochs=args.botdgt_epochs,
+        botdgt_ablation=args.botdgt_ablation,
         tignv2_epochs=args.tignv2_epochs,
         tignv2_patience=args.tignv2_patience,
         tignv2_structural_lr=args.tignv2_structural_lr,
@@ -168,7 +178,8 @@ def make_config(args: argparse.Namespace) -> ProjectConfig:
 
 def main() -> None:
     parser = build_parser()
-    args = parser.parse_args()
+    argv = _normalize_command_first_args(sys.argv[1:])
+    args = parser.parse_args(argv)
 
     config = make_config(args)
     config.ensure_directories()
@@ -177,14 +188,17 @@ def main() -> None:
     handlers = [logging.StreamHandler(), logging.FileHandler(config.logs_dir / f"{args.command}.log", encoding="utf-8")]
     logging.basicConfig(level=log_level, format=log_format, handlers=handlers)
 
+    import os as _os
+    if getattr(args, "only_botdgt", False):
+        _os.environ["ONLY_BOTDGT"] = "1"
+    elif getattr(args, "only_tignv2", False):
+        _os.environ["ONLY_TIGNV2"] = "1"
+    elif getattr(args, "only_tign", False):
+        _os.environ["ONLY_TIGN"] = "1"
+
     if args.command == "prepare":
         prepare_dataset(config)
     elif args.command == "train":
-        import os as _os
-        if getattr(args, "only_tignv2", False):
-            _os.environ["ONLY_TIGNV2"] = "1"
-        elif getattr(args, "only_tign", False):
-            _os.environ["ONLY_TIGN"] = "1"
         run_experiments(config)
     elif args.command == "visualize":
         generate_visualizations(config)
@@ -197,3 +211,10 @@ def main() -> None:
         generate_report(config)
     else:  # pragma: no cover
         parser.error(f"Unknown command: {args.command}")
+
+
+def _normalize_command_first_args(argv: list[str]) -> list[str]:
+    commands = {"prepare", "train", "visualize", "report", "run-all"}
+    if argv and argv[0] in commands:
+        return [*argv[1:], argv[0]]
+    return argv

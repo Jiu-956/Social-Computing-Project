@@ -76,6 +76,7 @@ class ProjectConfig:
     botdgt_structural_heads: int = 4
     botdgt_window_size: int = -1
     botdgt_embedding_dropout: float = 0.3
+    botdgt_ablation: str = "full"
     # TIGN-v2 独立参数
     tignv2_epochs: int = 80
     tignv2_patience: int = 20

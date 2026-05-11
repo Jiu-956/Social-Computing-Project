@@ -13,11 +13,25 @@ import torch.nn as nn
 from sklearn.metrics import accuracy_score, f1_score, precision_score, recall_score
 
 from ...config import ProjectConfig
-from .data import BotDGTDataset, _DATA_DIR
+from .data import BOTDGT_ABLATION_MODES, BotDGTDataset, _DATA_DIR
 from .loss import all_snapshots_loss
 from .model import BotDyGNN
 
 LOGGER = logging.getLogger(__name__)
+
+BOTDGT_EXPERIMENT_PREFIX = "feature_text_graph_botdgt"
+BOTDGT_ABLATION_LABELS = {
+    "full": "none",
+    "no_profile": "profile",
+    "no_text": "text",
+    "no_graph": "graph",
+}
+
+
+def botdgt_experiment_name(ablation_mode: str) -> str:
+    if ablation_mode == "full":
+        return BOTDGT_EXPERIMENT_PREFIX
+    return f"{BOTDGT_EXPERIMENT_PREFIX}_{ablation_mode}"
 
 
 @dataclass
@@ -287,11 +301,14 @@ class BotDGTTrainer:
         return test_metrics, best_state
 
 
-def run_botdgt(config: ProjectConfig) -> dict:
+def run_botdgt(config: ProjectConfig, ablation_mode: str = "full") -> dict:
+    if ablation_mode not in BOTDGT_ABLATION_MODES:
+        raise ValueError(f"Unknown BotDGT ablation mode: {ablation_mode}")
     device_str = "cuda" if torch.cuda.is_available() else "cpu"
+    experiment_name = botdgt_experiment_name(ablation_mode)
 
-    LOGGER.info("=== BotDGT: Loading preprocessed dataset ===")
-    dataset = BotDGTDataset(config)
+    LOGGER.info("=== BotDGT: Loading preprocessed dataset (ablation=%s) ===", ablation_mode)
+    dataset = BotDGTDataset(config, ablation_mode=ablation_mode)
 
     args = _Args(
         hidden_dim=config.gnn_hidden_dim,
@@ -315,7 +332,7 @@ def run_botdgt(config: ProjectConfig) -> dict:
         patience=10,
     )
 
-    LOGGER.info("=== BotDGT: Starting training ===")
+    LOGGER.info("=== BotDGT: Starting training (%s) ===", experiment_name)
     LOGGER.info(
         "structural_lr=%.1e temporal_lr=%.1e weight_decay=%.1e epochs=%d batch_size=%d interval=%s window_size=%d",
         args.structural_learning_rate, args.temporal_learning_rate,
@@ -378,7 +395,7 @@ def run_botdgt(config: ProjectConfig) -> dict:
         test_uids.append(global2uid.get(int(idx), f"unknown_{idx}"))
 
     predictions_df = pd.DataFrame({
-        "experiment": "feature_text_graph_botdgt",
+        "experiment": experiment_name,
         "family": "feature_text_graph",
         "split": "test",
         "user_id": test_uids[:len(test_labels)],
@@ -425,7 +442,7 @@ def run_botdgt(config: ProjectConfig) -> dict:
     val_uids = [global2uid.get(int(idx), f"unknown_{idx}") for idx in val_global_indices]
 
     val_predictions_df = pd.DataFrame({
-        "experiment": "feature_text_graph_botdgt",
+        "experiment": experiment_name,
         "family": "feature_text_graph",
         "split": "val",
         "user_id": val_uids[:len(val_labels)],
@@ -437,11 +454,11 @@ def run_botdgt(config: ProjectConfig) -> dict:
     predictions_df = pd.concat([predictions_df, val_predictions_df], ignore_index=True)
 
     val_f1 = trainer.best_val_f1
-    artifact_path = config.models_dir / "feature_text_graph_botdgt.pt"
+    artifact_path = config.models_dir / f"{experiment_name}.pt"
     torch.save({"state_dict": best_state, "best_val_f1": val_f1}, artifact_path)
 
     metrics_rows = [{
-        "experiment": "feature_text_graph_botdgt",
+        "experiment": experiment_name,
         "family": "feature_text_graph",
         "split": "test",
         "best_threshold": 0.5,
@@ -452,7 +469,7 @@ def run_botdgt(config: ProjectConfig) -> dict:
         "f1": test_metrics["f1"],
         "auc_roc": float("nan"),
     }, {
-        "experiment": "feature_text_graph_botdgt",
+        "experiment": experiment_name,
         "family": "feature_text_graph",
         "split": "val",
         "best_threshold": 0.5,
@@ -469,5 +486,7 @@ def run_botdgt(config: ProjectConfig) -> dict:
         "predictions": predictions_df,
         "best_val_f1": val_f1,
         "artifact_path": artifact_path,
-        "training_history": pd.DataFrame(trainer.history_rows),
+        "training_history": pd.DataFrame(trainer.history_rows).assign(experiment=experiment_name),
+        "ablation_mode": ablation_mode,
+        "removed_modality": BOTDGT_ABLATION_LABELS[ablation_mode],
     }
