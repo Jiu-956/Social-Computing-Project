@@ -34,6 +34,18 @@ def botdgt_experiment_name(ablation_mode: str) -> str:
     return f"{BOTDGT_EXPERIMENT_PREFIX}_{ablation_mode}"
 
 
+def _reset_botdgt_random_state(seed: int) -> None:
+    import random as _random
+
+    _random.seed(seed)
+    np.random.seed(seed)
+    torch.manual_seed(seed)
+    if torch.cuda.is_available():
+        torch.cuda.manual_seed_all(seed)
+    torch.backends.cudnn.deterministic = True
+    torch.backends.cudnn.benchmark = False
+
+
 @dataclass
 class _Args:
     hidden_dim: int
@@ -304,6 +316,7 @@ class BotDGTTrainer:
 def run_botdgt(config: ProjectConfig, ablation_mode: str = "full") -> dict:
     if ablation_mode not in BOTDGT_ABLATION_MODES:
         raise ValueError(f"Unknown BotDGT ablation mode: {ablation_mode}")
+    _reset_botdgt_random_state(config.random_state)
     device_str = "cuda" if torch.cuda.is_available() else "cpu"
     experiment_name = botdgt_experiment_name(ablation_mode)
 
