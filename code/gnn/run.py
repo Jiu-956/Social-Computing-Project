@@ -5,6 +5,7 @@ from typing import Any
 
 import numpy as np
 import pandas as pd
+import random as _random
 import torch
 
 try:
@@ -243,6 +244,7 @@ def run_graph_neural_models(
     model_specs = [s for s in model_specs if s[0] not in ("feature_text_graph_botdgt", "feature_text_graph_tignv2")]
 
     botdgt_raw_results: list[dict[str, Any]] = []
+    botdgt_rng_state = _capture_random_state()
     for name, _, _, _ in botdgt_specs:
         LOGGER.info("Running graph neural model: %s (new BotDGT module)", name)
         from .botdgt import run_botdgt
@@ -251,7 +253,12 @@ def run_graph_neural_models(
         ablation_modes = list(BOTDGT_ABLATION_MODES) if ablation_setting == "all" else [ablation_setting]
         for ablation_mode in ablation_modes:
             LOGGER.info("Running BotDGT ablation mode: %s", ablation_mode)
-            botdgt_result = run_botdgt(config=config, ablation_mode=ablation_mode)
+            if ablation_setting == "all":
+                _restore_random_state(botdgt_rng_state)
+            botdgt_result = run_botdgt(
+                config=config,
+                ablation_mode=ablation_mode,
+            )
             botdgt_raw_results.append(botdgt_result)
             from .train import GNNResult
             outputs.append(GNNResult(
@@ -305,6 +312,25 @@ def run_graph_neural_models(
             )
         )
     return outputs
+
+
+def _capture_random_state() -> dict[str, Any]:
+    state: dict[str, Any] = {
+        "python": _random.getstate(),
+        "numpy": np.random.get_state(),
+        "torch": torch.random.get_rng_state(),
+    }
+    if torch.cuda.is_available():
+        state["cuda"] = torch.cuda.get_rng_state_all()
+    return state
+
+
+def _restore_random_state(state: dict[str, Any]) -> None:
+    _random.setstate(state["python"])
+    np.random.set_state(state["numpy"])
+    torch.random.set_rng_state(state["torch"])
+    if torch.cuda.is_available() and "cuda" in state:
+        torch.cuda.set_rng_state_all(state["cuda"])
 
 
 def _write_botdgt_modality_ablation_table(config: ProjectConfig, results: list[dict[str, Any]]) -> None:

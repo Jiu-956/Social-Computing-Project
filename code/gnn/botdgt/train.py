@@ -313,10 +313,11 @@ class BotDGTTrainer:
         return test_metrics, best_state
 
 
-def run_botdgt(config: ProjectConfig, ablation_mode: str = "full") -> dict:
+def run_botdgt(config: ProjectConfig, ablation_mode: str = "full", *, reset_random_state: bool = False) -> dict:
     if ablation_mode not in BOTDGT_ABLATION_MODES:
         raise ValueError(f"Unknown BotDGT ablation mode: {ablation_mode}")
-    _reset_botdgt_random_state(config.random_state)
+    if reset_random_state:
+        _reset_botdgt_random_state(config.random_state)
     device_str = "cuda" if torch.cuda.is_available() else "cpu"
     experiment_name = botdgt_experiment_name(ablation_mode)
 

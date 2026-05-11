@@ -168,6 +168,10 @@ class BotDGTDataset:
             )
 
     def _load_or_build_batches(self, split: str):
+        if self.ablation_mode == "no_graph":
+            self._build_graph_free_batches(split)
+            return
+
         cached = _load_cached_batches(self.interval, self.batch_size, self.seed, split)
         if cached is not None:
             for key, val in cached.items():
@@ -212,6 +216,36 @@ class BotDGTDataset:
             all_exist_nodes.append([sg.exist_nodes.to("cpu") for sg in subgraphs])
             all_clustering.append([sg.clustering_coefficient.to("cpu") for sg in subgraphs])
             all_blr.append([sg.bidirectional_links_ratio.to("cpu") for sg in subgraphs])
+
+        setattr(self, f"{split}_right", all_right)
+        setattr(self, f"{split}_n_id", all_n_id)
+        setattr(self, f"{split}_edge_index", all_edge_index)
+        setattr(self, f"{split}_edge_type", all_edge_type)
+        setattr(self, f"{split}_exist_nodes", all_exist_nodes)
+        setattr(self, f"{split}_clustering_coefficient", all_clustering)
+        setattr(self, f"{split}_bidirectional_links_ratio", all_blr)
+
+    def _build_graph_free_batches(self, split: str) -> None:
+        LOGGER.info("Building graph-free direct batches for %s (BotDGT no_graph ablation)...", split)
+        input_nodes = getattr(self, f"{split}_idx").to("cpu")
+        all_right = []
+        all_n_id = []
+        all_edge_index = []
+        all_edge_type = []
+        all_exist_nodes = []
+        all_clustering = []
+        all_blr = []
+
+        for start in range(0, len(input_nodes), self.batch_size):
+            batch_nodes = input_nodes[start:start + self.batch_size]
+            right = len(batch_nodes)
+            all_right.append(right)
+            all_n_id.append([batch_nodes.clone() for _ in range(self.window_size)])
+            all_edge_index.append([torch.empty((2, 0), dtype=torch.long) for _ in range(self.window_size)])
+            all_edge_type.append([torch.empty((0,), dtype=torch.long) for _ in range(self.window_size)])
+            all_exist_nodes.append([torch.ones(right, dtype=torch.long) for _ in range(self.window_size)])
+            all_clustering.append([torch.zeros((right, 1), dtype=torch.float32) for _ in range(self.window_size)])
+            all_blr.append([torch.zeros((right, 1), dtype=torch.float32) for _ in range(self.window_size)])
 
         setattr(self, f"{split}_right", all_right)
         setattr(self, f"{split}_n_id", all_n_id)

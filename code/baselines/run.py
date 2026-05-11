@@ -29,8 +29,6 @@ LOGGER = logging.getLogger(__name__)
 
 def run_experiments(config: ProjectConfig) -> dict[str, Any]:
     config.ensure_directories()
-    if os.environ.get("ONLY_BOTDGT"):
-        return _run_botdgt_only_experiments(config)
 
     prepared = load_prepared_dataset(config)
     users = prepared.users.copy()
@@ -189,7 +187,11 @@ def _run_botdgt_only_experiments(config: ProjectConfig) -> dict[str, Any]:
 
     for ablation_mode in ablation_modes:
         LOGGER.info("Running BotDGT-only experiment: %s", ablation_mode)
-        result = run_botdgt(config=config, ablation_mode=ablation_mode)
+        result = run_botdgt(
+            config=config,
+            ablation_mode=ablation_mode,
+            reset_random_state=(ablation_setting == "all"),
+        )
         raw_results.append(result)
         metrics_rows.extend(result["metrics_rows"])
         prediction_frames.append(result["predictions"])
