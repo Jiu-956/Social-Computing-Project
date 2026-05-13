@@ -189,17 +189,22 @@ class MultiGranularityBotDyGNN(nn.Module):
         )
         temporal_layer = self.temporal_encoders[granularity]
 
-        x = self.node_feature_embedding(
-            batch_data[f"{granularity}_des"],
-            batch_data[f"{granularity}_tweet"],
-            batch_data[f"{granularity}_num"],
-            batch_data[f"{granularity}_cat"],
-        )
+        des = batch_data[f"{granularity}_des"]  # [T, B, D_des]
+        tweet = batch_data[f"{granularity}_tweet"]  # [T, B, D_tweet]
+        num = batch_data[f"{granularity}_num"]  # [T, B, D_num]
+        cat = batch_data[f"{granularity}_cat"]  # [T, B, D_cat]
 
         structural_outputs = []
-        for t in range(len(batch_data[f"{granularity}_edge_index"])):
+        num_snapshots = len(batch_data[f"{granularity}_edge_index"])
+        for t in range(num_snapshots):
+            x = self.node_feature_embedding(
+                des[t][:current_batch_size],
+                tweet[t][:current_batch_size],
+                num[t][:current_batch_size],
+                cat[t][:current_batch_size],
+            )
             edge_index = batch_data[f"{granularity}_edge_index"][t]
-            output = structural_layer(x, edge_index)[:current_batch_size]
+            output = structural_layer(x, edge_index)
             structural_outputs.append(output)
 
         structural_outputs = torch.stack(structural_outputs, dim=1)  # [B, T, H]
@@ -315,18 +320,19 @@ class MultiGranularityBotDGTTrainer:
                 gd = self.datasets[granularity]
                 gran_n_id = getattr(gd, f"{split}_n_id")[batch_idx]  # list of tensors (window_size tensors)
 
-                # Each element in gran_n_id is a tensor of node indices for that snapshot
+                # Stack indices for all snapshots, then index once per time step
+                # Each tensor in gran_n_id has shape [num_nodes_at_t], may vary per time step
                 batch_data[f"{granularity}_des"] = torch.stack([
-                    self.des_tensor[nid.tolist()] for nid in gran_n_id
+                    self.des_tensor[nid] for nid in gran_n_id
                 ]).to(self.device)
                 batch_data[f"{granularity}_tweet"] = torch.stack([
-                    self.tweets_tensor[nid.tolist()] for nid in gran_n_id
+                    self.tweets_tensor[nid] for nid in gran_n_id
                 ]).to(self.device)
                 batch_data[f"{granularity}_num"] = torch.stack([
-                    self.num_prop[nid.tolist()] for nid in gran_n_id
+                    self.num_prop[nid] for nid in gran_n_id
                 ]).to(self.device)
                 batch_data[f"{granularity}_cat"] = torch.stack([
-                    self.category_prop[nid.tolist()] for nid in gran_n_id
+                    self.category_prop[nid] for nid in gran_n_id
                 ]).to(self.device)
                 batch_data[f"{granularity}_edge_index"] = [ei.to(self.device) for ei in getattr(gd, f"{split}_edge_index")[batch_idx]]
                 batch_data[f"{granularity}_clustering"] = [c.to(self.device) for c in getattr(gd, f"{split}_clustering_coefficient")[batch_idx]]
