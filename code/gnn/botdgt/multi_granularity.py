@@ -189,38 +189,42 @@ class MultiGranularityBotDyGNN(nn.Module):
         )
         temporal_layer = self.temporal_encoders[granularity]
 
-        des = batch_data[f"{granularity}_des"]  # [T, B, D_des]
-        tweet = batch_data[f"{granularity}_tweet"]  # [T, B, D_tweet]
-        num = batch_data[f"{granularity}_num"]  # [T, B, D_num]
-        cat = batch_data[f"{granularity}_cat"]  # [T, B, D_cat]
+        des_list = batch_data[f"{granularity}_des"]  # list of [N_t, D] tensors
+        tweet_list = batch_data[f"{granularity}_tweet"]
+        num_list = batch_data[f"{granularity}_num"]
+        cat_list = batch_data[f"{granularity}_cat"]
+        edge_index_list = batch_data[f"{granularity}_edge_index"]
+        clustering_list = batch_data[f"{granularity}_clustering"]
+        bidirectional_list = batch_data[f"{granularity}_bidirectional"]
+        exist_nodes = batch_data[f"{granularity}_exist_nodes"]  # [T, B]
 
         structural_outputs = []
-        num_snapshots = len(batch_data[f"{granularity}_edge_index"])
+        num_snapshots = len(edge_index_list)
         for t in range(num_snapshots):
             x = self.node_feature_embedding(
-                des[t][:current_batch_size],
-                tweet[t][:current_batch_size],
-                num[t][:current_batch_size],
-                cat[t][:current_batch_size],
+                des_list[t], tweet_list[t], num_list[t], cat_list[t],
             )
-            edge_index = batch_data[f"{granularity}_edge_index"][t]
-            output = structural_layer(x, edge_index)
+            output = structural_layer(x, edge_index_list[t])[:current_batch_size]
             structural_outputs.append(output)
 
         structural_outputs = torch.stack(structural_outputs, dim=1)  # [B, T, H]
 
-        pos_clustering = torch.stack([
-            self.pos_clustering(batch_data[f"{granularity}_clustering"][t][:current_batch_size])
-            for t in range(len(batch_data[f"{granularity}_clustering"]))
-        ], dim=1)
+        # Position encodings - clustering and bidirectional are lists
+        pos_clustering_list = [
+            self.pos_clustering(clustering_list[t][:current_batch_size])
+            for t in range(len(clustering_list))
+        ]
+        pos_clustering = torch.stack(pos_clustering_list, dim=1)  # [B, T, H]
 
-        pos_bidirectional = torch.stack([
-            self.pos_bidirectional(batch_data[f"{granularity}_bidirectional"][t][:current_batch_size])
-            for t in range(len(batch_data[f"{granularity}_bidirectional"]))
-        ], dim=1)
+        pos_bidirectional_list = [
+            self.pos_bidirectional(bidirectional_list[t][:current_batch_size])
+            for t in range(len(bidirectional_list))
+        ]
+        pos_bidirectional = torch.stack(pos_bidirectional_list, dim=1)  # [B, T, H]
 
-        exist_nodes = batch_data[f"{granularity}_exist_nodes"]  # [T, B]
-        exist_nodes = exist_nodes.transpose(0, 1)[:current_batch_size]  # [B, T]
+        # exist_nodes is a list, need to stack and transpose
+        exist_nodes_tensor = torch.stack([en[:current_batch_size] for en in exist_nodes], dim=0)  # [T, B]
+        exist_nodes = exist_nodes_tensor.transpose(0, 1)  # [B, T]
 
         temporal_output = temporal_layer(
             structural_outputs, pos_clustering, pos_bidirectional, exist_nodes
@@ -320,26 +324,15 @@ class MultiGranularityBotDGTTrainer:
                 gd = self.datasets[granularity]
                 gran_n_id = getattr(gd, f"{split}_n_id")[batch_idx]  # list of tensors (window_size tensors)
 
-                # Stack indices for all snapshots, then index once per time step
-                # Each tensor in gran_n_id has shape [num_nodes_at_t], may vary per time step
-                batch_data[f"{granularity}_des"] = torch.stack([
-                    self.des_tensor[nid] for nid in gran_n_id
-                ]).to(self.device)
-                batch_data[f"{granularity}_tweet"] = torch.stack([
-                    self.tweets_tensor[nid] for nid in gran_n_id
-                ]).to(self.device)
-                batch_data[f"{granularity}_num"] = torch.stack([
-                    self.num_prop[nid] for nid in gran_n_id
-                ]).to(self.device)
-                batch_data[f"{granularity}_cat"] = torch.stack([
-                    self.category_prop[nid] for nid in gran_n_id
-                ]).to(self.device)
+                # Keep as list since node counts vary per snapshot
+                batch_data[f"{granularity}_des"] = [self.des_tensor[nid] for nid in gran_n_id]
+                batch_data[f"{granularity}_tweet"] = [self.tweets_tensor[nid] for nid in gran_n_id]
+                batch_data[f"{granularity}_num"] = [self.num_prop[nid] for nid in gran_n_id]
+                batch_data[f"{granularity}_cat"] = [self.category_prop[nid] for nid in gran_n_id]
                 batch_data[f"{granularity}_edge_index"] = [ei.to(self.device) for ei in getattr(gd, f"{split}_edge_index")[batch_idx]]
                 batch_data[f"{granularity}_clustering"] = [c.to(self.device) for c in getattr(gd, f"{split}_clustering_coefficient")[batch_idx]]
                 batch_data[f"{granularity}_bidirectional"] = [b.to(self.device) for b in getattr(gd, f"{split}_bidirectional_links_ratio")[batch_idx]]
-
-                exist_nodes_list = getattr(gd, f"{split}_exist_nodes")[batch_idx]
-                batch_data[f"{granularity}_exist_nodes"] = torch.stack([en.to(self.device) for en in exist_nodes_list], dim=0)
+                batch_data[f"{granularity}_exist_nodes"] = [en.to(self.device) for en in getattr(gd, f"{split}_exist_nodes")[batch_idx]]
 
             batches.append(batch_data)
 
