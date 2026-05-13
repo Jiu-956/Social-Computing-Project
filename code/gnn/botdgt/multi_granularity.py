@@ -313,12 +313,21 @@ class MultiGranularityBotDGTTrainer:
 
             for granularity in self.args.granularities:
                 gd = self.datasets[granularity]
-                gran_n_id = getattr(gd, f"{split}_n_id")[batch_idx]
+                gran_n_id = getattr(gd, f"{split}_n_id")[batch_idx]  # list of tensors (window_size tensors)
 
-                batch_data[f"{granularity}_des"] = self.des_tensor[gran_n_id].to(self.device)
-                batch_data[f"{granularity}_tweet"] = self.tweets_tensor[gran_n_id].to(self.device)
-                batch_data[f"{granularity}_num"] = self.num_prop[gran_n_id].to(self.device)
-                batch_data[f"{granularity}_cat"] = self.category_prop[gran_n_id].to(self.device)
+                # Each element in gran_n_id is a tensor of node indices for that snapshot
+                batch_data[f"{granularity}_des"] = torch.stack([
+                    self.des_tensor[nid.tolist()] for nid in gran_n_id
+                ]).to(self.device)
+                batch_data[f"{granularity}_tweet"] = torch.stack([
+                    self.tweets_tensor[nid.tolist()] for nid in gran_n_id
+                ]).to(self.device)
+                batch_data[f"{granularity}_num"] = torch.stack([
+                    self.num_prop[nid.tolist()] for nid in gran_n_id
+                ]).to(self.device)
+                batch_data[f"{granularity}_cat"] = torch.stack([
+                    self.category_prop[nid.tolist()] for nid in gran_n_id
+                ]).to(self.device)
                 batch_data[f"{granularity}_edge_index"] = [ei.to(self.device) for ei in getattr(gd, f"{split}_edge_index")[batch_idx]]
                 batch_data[f"{granularity}_clustering"] = [c.to(self.device) for c in getattr(gd, f"{split}_clustering_coefficient")[batch_idx]]
                 batch_data[f"{granularity}_bidirectional"] = [b.to(self.device) for b in getattr(gd, f"{split}_bidirectional_links_ratio")[batch_idx]]
@@ -331,9 +340,11 @@ class MultiGranularityBotDGTTrainer:
         return batches
 
     def forward_one_batch(self, batch_data: dict) -> tuple:
-        labels = self.labels[batch_data["n_id"]].to(self.device)
+        # n_id is a list of tensors (one per snapshot), use first snapshot's n_id for labels
+        n_id = batch_data["n_id"][0]  # first snapshot's node ids
+        labels = self.labels[n_id.tolist()].to(self.device)
         output, fusion_info = self.model(batch_data, batch_data["batch_size"])
-        loss = self.criterion(output, labels[:batch_data["batch_size"]])
+        loss = self.criterion(output, labels)
         return output, loss, labels, fusion_info
 
     def train_per_epoch(self, current_epoch: int) -> dict:
@@ -512,7 +523,7 @@ def run_botdgt_multi_granularity(
             all_preds.extend(preds[:batch_data["batch_size"]])
             all_probs.extend(probs[:batch_data["batch_size"], 1].cpu().numpy())
             all_labels.extend(labels[:batch_data["batch_size"]].cpu().numpy())
-            for idx in batch_data["n_id"]:
+            for idx in batch_data["n_id"][0]:  # first snapshot's node ids
                 all_uids.append(global2uid.get(int(idx), f"unknown_{idx}"))
 
     predictions_df = pd.DataFrame({
