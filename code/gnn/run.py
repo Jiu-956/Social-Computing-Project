@@ -272,6 +272,20 @@ def run_graph_neural_models(
     if botdgt_raw_results:
         _write_botdgt_modality_ablation_table(config, botdgt_raw_results)
 
+    # Multi-granularity BotDGTv1
+    if getattr(config, "use_multi_granularity", False):
+        LOGGER.info("Running multi-granularity BotDGTv1...")
+        from .botdgt.multi_granularity import run_botdgt_multi_granularity
+        mg_result = run_botdgt_multi_granularity(config=config)
+        from .train import GNNResult
+        outputs.append(GNNResult(
+            metrics_rows=mg_result["metrics_rows"],
+            predictions=mg_result["predictions"],
+            best_val_f1=mg_result["best_val_f1"],
+            artifact_path=mg_result["artifact_path"],
+            training_history=mg_result["training_history"],
+        ))
+
     for name, _, _, _ in tignv2_specs:
         LOGGER.info("Running graph neural model: %s (TIGN-v2: temporal invariance)", name)
         from .tignv2 import run_tignv2

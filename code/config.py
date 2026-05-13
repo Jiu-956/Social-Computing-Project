@@ -98,6 +98,13 @@ class ProjectConfig:
     tignv2_temporal_invariance_weight: float = 0.0
     tignv2_specific_decorr_weight: float = 0.0
     tignv2_loss_coefficient: float = 1.05
+    # Multi-granularity BotDGTv1 parameters
+    use_multi_granularity: bool = False
+    granularities: str = "year"
+    granularity_fusion: str = "gate"
+    share_structural_encoder: bool = True
+    share_temporal_encoder: bool = True
+    temporal_readout: str = "last"
 
     visualization_sample_size: int = 3000
     random_state: int = 1234

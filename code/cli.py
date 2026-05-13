@@ -98,6 +98,21 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--tignv2-cross-modal-weight", type=float, default=0.0)
     parser.add_argument("--tignv2-temporal-invariance-weight", type=float, default=0.0)
     parser.add_argument("--tignv2-specific-decorr-weight", type=float, default=0.0)
+    # Multi-granularity BotDGTv1 parameters
+    parser.add_argument("--use-multi-granularity", action="store_true",
+                        help="Enable multi-granularity BotDGT")
+    parser.add_argument("--granularities", type=str, default="year",
+                        help="Comma-separated granularities: year,six_months,three_months")
+    parser.add_argument("--granularity-fusion", type=str, default="gate",
+                        choices=("gate", "mean", "concat"),
+                        help="Fusion method for multi-granularity representations")
+    parser.add_argument("--share-structural-encoder", action="store_true", default=True,
+                        help="Share structural encoder across granularities")
+    parser.add_argument("--share-temporal-encoder", action="store_true", default=True,
+                        help="Share temporal encoder across granularities")
+    parser.add_argument("--temporal-readout", type=str, default="last",
+                        choices=("last", "masked_mean"),
+                        help="How to read final representation from temporal sequence")
 
     parser.add_argument("--visualization-sample-size", type=int, default=3000)
     parser.add_argument("--random-state", type=int, default=42)
@@ -171,6 +186,12 @@ def make_config(args: argparse.Namespace) -> ProjectConfig:
         tignv2_cross_modal_weight=args.tignv2_cross_modal_weight,
         tignv2_temporal_invariance_weight=args.tignv2_temporal_invariance_weight,
         tignv2_specific_decorr_weight=args.tignv2_specific_decorr_weight,
+        use_multi_granularity=args.use_multi_granularity,
+        granularities=args.granularities,
+        granularity_fusion=args.granularity_fusion,
+        share_structural_encoder=args.share_structural_encoder,
+        share_temporal_encoder=args.share_temporal_encoder,
+        temporal_readout=args.temporal_readout,
         visualization_sample_size=args.visualization_sample_size,
         random_state=args.random_state,
     )
